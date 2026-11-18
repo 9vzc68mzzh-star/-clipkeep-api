@@ -88,6 +88,18 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(result['finished'])
         self.assertEqual(result['items'][0]['error_code'],'storage_limit')
 
+    def test_dispatch_receipt_and_range_probe_do_not_finish_a_file(self):
+        data=self.batch([URL,URL]);job_id=data['items'][0]['id']
+        path=Path(self.tmp.name)/'transfer.mp4';path.write_bytes((FIXTURES/'compatible.mp4').read_bytes())
+        job=server.jobs[job_id]
+        job.update(status='ready',stage='sending',file_ready=True,delivery_status='waiting',file=str(path),filename='clip-01.mp4')
+        response=self.client.post('/api/public/batches/'+data['id']+'/sent',json={'id':job_id,'attempt':1})
+        self.assertEqual(response.status_code,200);self.assertFalse(server.settled(job))
+        self.assertEqual(self.client.get('/api/files/'+job_id,headers={'Range':'bytes=0-1'}).status_code,206)
+        self.assertFalse(server.settled(job))
+        self.assertEqual(self.client.get('/api/files/'+job_id,headers={'Range':'bytes=2-'}).status_code,206)
+        self.assertTrue(server.settled(job))
+
     def test_real_attachments_unique_names_range_and_streaming_zip(self):
         data=self.batch([URL]*12)
         for i,item in enumerate(data['items'],1):

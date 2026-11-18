@@ -10,7 +10,7 @@
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const lines = () => input.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const canSave = job => job.status === 'ready' || job.file_ready;
-  const isDone = job => job.status === 'ready' && job.delivery_status !== 'waiting';
+  const isDone = job => job.status === 'ready' && (!job.delivery_status || job.delivery_status === 'sent');
   const receipt = job => `${job.id}:${job.attempt || 1}`;
   const selected = () => run ? run.items.filter(j => canSave(j) && !run.unselected.has(j.id)) : [];
   const freshRun = () => ({base:apiBase,key:apiKey,format,items:[],sent:new Set(),dispatched:new Set(),queued:new Set(),unselected:new Set(),seenReady:new Set(),selectNew:true,finished:false});

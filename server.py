@@ -21,7 +21,6 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 import yt_dlp
 from yt_dlp.extractor.facebook import FacebookIE, FacebookReelIE
@@ -573,11 +572,11 @@ def prepare(job_id: str, data: Download, url: str, emit=lambda event: None):
         detail = re.sub(r'https?://\S+', '[url]', detail)
         detail = re.sub(r'\x1b\[[0-9;]*m', '', detail)
         logger.warning('download_failed code=%s exception=%s detail=%s', code, type(exc).__name__, ' '.join(detail.split())[:400])
+        shutil.rmtree(folder, ignore_errors=True)
         with lock:
             jobs[job_id].update(status='cancelled' if code == 'cancelled' else 'error',
                                stage='cancelled' if code == 'cancelled' else 'failed',
                                error=ERROR_MESSAGES[code], error_code=code, error_type=type(exc).__name__, finished=time.time())
-        shutil.rmtree(folder, ignore_errors=True)
     finally:
         notify('result', progressed=True)
 
@@ -664,8 +663,12 @@ class Sent(BaseModel):
 def acknowledge(batch_id, data, public=False):
     with lock:
         batch_response(batch_id, public)
-        if data.id not in batches[batch_id]['ids'] or not mark_sent(data.id, data.attempt):
+        job = jobs.get(data.id, {})
+        if data.id not in batches[batch_id]['ids'] or job.get('status') != 'ready' or job.get('attempt') != data.attempt:
             raise HTTPException(409, 'ไฟล์ยังไม่พร้อมหรือเป็นคำขอจากครั้งก่อน กรุณาเช็กคิวอีกครั้ง')
+        # A click is only a request. FileResponse completion confirms the transfer.
+        if job.get('delivery_status') == 'waiting':
+            job.update(delivery_status='requested', delivery_touched=time.monotonic())
         return {'ok': True}
 
 
@@ -690,35 +693,36 @@ def process(job_id: str, data: Download, url: str):
                 job.update(auto_retry=1, status='processing', stage='retrying', progress=0)
                 for key in ('error', 'error_code', 'error_type', 'finished'):
                     job.pop(key, None)
+                job.pop('delivered_ranges', None)
             else:
                 job.update(status='processing', stage='resolving', progress=1)
         try:
             if job.get('cancel'):
                 raise DownloadFailure('cancelled')
-            if not job.get('file_ready'):
-                run_attempt(job_id, data, url)
-            elif automatic:
+            if job.get('file_ready'):
                 job.update(status='ready', stage='sending', progress=99, delivery_status='waiting')
+            else:
+                run_attempt(job_id, data, url)
             if job['status'] == 'error':
                 raise DownloadFailure(job['error_code'])
             if job.get('batch_id') and job['status'] == 'ready':
-                deadline = time.monotonic() + DELIVERY_SECONDS
+                job['delivery_touched'] = time.monotonic()
                 while job.get('delivery_status') != 'sent':
                     if job.get('cancel'):
                         raise DownloadFailure('cancelled')
-                    if time.monotonic() > deadline:
+                    if time.monotonic() - job['delivery_touched'] > DELIVERY_SECONDS:
                         raise DownloadFailure('delivery_timeout')
                     time.sleep(.1)
             break
         except Exception as exc:
             code = error_code(exc)
             retrying = automatic == 0 and code != 'cancelled'
+            if not job.get('file_ready'):
+                shutil.rmtree(ROOT / job_id, ignore_errors=True)
             with lock:
                 job.update(status='processing' if retrying else 'cancelled' if code == 'cancelled' else 'error',
                            stage='retrying' if retrying else 'cancelled' if code == 'cancelled' else 'failed',
                            error=None if retrying else ERROR_MESSAGES[code], error_code=code, finished=time.time())
-            if not job.get('file_ready'):
-                shutil.rmtree(ROOT / job_id, ignore_errors=True)
             if code == 'cancelled' or automatic == 1:
                 break
     with lock:
@@ -753,12 +757,54 @@ def ready_file(job_id):
     return job
 
 
+class AttachmentResponse(FileResponse):
+    def __init__(self, job_id, job):
+        super().__init__(job['file'], filename=job['filename'],
+                         media_type='audio/mpeg' if job['file'].endswith('.mp3') else 'video/mp4',
+                         headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+        self.job_id, self.attempt = job_id, job.get('attempt')
+
+    async def __call__(self, scope, receive, send):
+        status = 0
+        content_range = ''
+        async def track(message):
+            nonlocal status, content_range
+            await send(message)
+            if message['type'] == 'http.response.start':
+                status = message['status']
+                content_range = dict(message.get('headers', [])).get(b'content-range', b'').decode()
+            elif message['type'] == 'http.response.body' and message.get('body'):
+                with lock:
+                    job = jobs.get(self.job_id)
+                    if job and job.get('attempt') == self.attempt:
+                        job['delivery_touched'] = time.monotonic()
+        await super().__call__(scope, receive, track)
+        # Range probes/previews must not release the sequential queue.
+        if status == 200 and scope['method'] == 'GET':
+            mark_sent(self.job_id, self.attempt)
+        elif status == 206 and scope['method'] == 'GET':
+            match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', content_range)
+            if match:
+                start, end, total = map(int, match.groups())
+                with lock:
+                    job = jobs.get(self.job_id)
+                    if job and job.get('attempt') == self.attempt:
+                        merged = []
+                        for left, right in sorted([*job.get('delivered_ranges', []), (start, end)]):
+                            if merged and left <= merged[-1][1] + 1:
+                                merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+                            else:
+                                merged.append((left, right))
+                        job['delivered_ranges'] = merged[:100]
+                        if merged and merged[0][0] == 0 and merged[0][1] >= total - 1:
+                            mark_sent(self.job_id, self.attempt)
+
+
 @app.get('/api/files/{job_id}')
 def file(job_id: str):
     # Capability URL; proper attachment + filename works across origins, including Safari.
     job = ready_file(job_id)
-    return FileResponse(job['file'], filename=job['filename'], background=BackgroundTask(mark_sent, job_id, job.get('attempt')), media_type='audio/mpeg' if job['file'].endswith('.mp3') else 'video/mp4',
-                        headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+    return AttachmentResponse(job_id, job)
 
 
 @app.get('/api/preview/{job_id}')

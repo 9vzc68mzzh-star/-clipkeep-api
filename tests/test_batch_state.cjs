@@ -95,3 +95,33 @@ test('restore ignores a bookmark for a different backend without contacting it',
  const session=storage();session.setItem('klipnivo-batch-v1',JSON.stringify({base:'https://other.example',id:'batch-1'}));
  const app=launch({session});await app.settle();assert.equal(app.requests.length,0);assert.equal(session.getItem('klipnivo-batch-v1'),null);
 });
+test('14 links dispatch and acknowledge in order; a lost receipt does not resend; ZIP includes all successes',async()=>{
+ const items=Array.from({length:14},(_,i)=>({...job(i+1,'queued'),attempt:1}));
+ let next=0,ackFailed=false,app;const acknowledgements=[];
+ const state=()=>{
+   if(next===3){Object.assign(items[next],{status:'error',stage:'failed',error:'Permanent failure'});next++;}
+   if(next<items.length)Object.assign(items[next],{status:'ready',stage:'sending',file_ready:true,delivery_status:'waiting',progress:99});
+   return JSON.parse(JSON.stringify(snapshot(items,next===items.length)));
+ };
+ app=launch({apiHandler:(path,options)=>{
+   if(path.endsWith('/sent')){
+     const receipt=JSON.parse(options.body),number=Number(receipt.id.split('-')[1]);
+     assert.equal(number,next+1);assert(app.saves.at(-1).name.includes(String(number)));
+     if(!ackFailed){ackFailed=true;throw TypeError('receipt response lost');}
+     acknowledgements.push(number);Object.assign(items[next],{stage:'done',delivery_status:'sent',progress:100});next++;
+     return {ok:true};
+   }
+   return state();
+ }});
+ await app.start(items.map(j=>j.url));
+ assert.equal(app.rows()[0].dataset.active,'true');assert.equal(app.saves.length,1);
+ for(let n=0;n<35;n++){await app.tick(1100);await app.tick(1500);await app.settle();}
+ assert.deepEqual(acknowledgements,[1,2,3,5,6,7,8,9,10,11,12,13,14]);
+ assert.equal(app.saves.length,13);assert.equal(new Set(app.saves.map(f=>f.name)).size,13);
+ assert(app.$('#batch-summary').textContent.includes('สำเร็จ 13'));
+ assert(app.$('#batch-summary').textContent.includes('ไม่สำเร็จ 1'));
+ assert(app.$('#batch-summary').textContent.includes('04'));
+ app.$('#select-all').checked=false;await app.$('#select-all').emit('change');
+ assert(app.$('#zip-all').textContent.includes('(13)'));await app.$('#zip-all').emit('click');
+ assert(!app.saves.at(-1).url.includes('items='));assert(app.saves.at(-1).name.endsWith('.zip'));
+});

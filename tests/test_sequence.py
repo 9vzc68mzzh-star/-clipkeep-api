@@ -40,6 +40,10 @@ class SequenceTests(unittest.TestCase):
                         self.assertEqual(wrong.status_code,409)
                         ack=client.post(f'/api/public/batches/{batch_id}/sent',json={'id':job['id'],'attempt':job['attempt']})
                         self.assertEqual(ack.status_code,200)
+                        self.assertFalse(server.settled(server.jobs[job['id']]))
+                        probe=client.get(job['download_url'],headers={'Range':'bytes=0-1'})
+                        self.assertEqual(probe.status_code,206)
+                        self.assertFalse(server.settled(server.jobs[job['id']]))
                         response=client.get(job['download_url']);self.assertIn('attachment',response.headers['content-disposition'])
                         path=Path(tmp)/f'download-{job["index"]}.mp4';path.write_bytes(response.content)
                         media=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(path)]))
@@ -71,7 +75,7 @@ class SequenceTests(unittest.TestCase):
             for _ in range(250):
                 retry=client.get('/api/public/batches/'+batch_id).json()
                 for job in retry['items']:
-                    if job['status']=='ready' and job['delivery_status']=='waiting':client.post(f'/api/public/batches/{batch_id}/sent',json={'id':job['id'],'attempt':job['attempt']})
+                    if job['status']=='ready' and job['delivery_status']=='waiting':client.get(job['download_url'])
                 if retry['finished']:break
                 time.sleep(.05)
             self.assertTrue(retry['finished']);self.assertEqual((retry['ready'],retry['failed']),(14,0))
