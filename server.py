@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request as URLRequest, build_opener
-from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,9 @@ ROOT = Path('/tmp/clipkeep')
 ROOT.mkdir(exist_ok=True)
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_VIDEO_SECONDS = 2 * 60 * 60
+PUBLIC_DOWNLOADS = os.environ.get('CLIPKEEP_PUBLIC_DOWNLOADS', '').lower() in ('1', 'true')
+PUBLIC_RATE_WINDOW = 600
+PUBLIC_RATE_LIMIT = 5
 TTL = 3600
 FACEBOOK_HOSTS = ('facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.watch')
 ERROR_MESSAGES = {
@@ -43,6 +46,7 @@ ERROR_MESSAGES = {
 }
 logger = logging.getLogger('clipkeep')
 jobs = {}
+public_requests = {}
 lock = threading.Lock()
 pool = ThreadPoolExecutor(max_workers=2)
 app = FastAPI(title='ClipKeep', docs_url=None, redoc_url=None)
@@ -153,7 +157,7 @@ threading.Thread(target=janitor, daemon=True).start()
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 2}
+    return {'service': 'clipkeep', 'version': 3, 'public_downloads': PUBLIC_DOWNLOADS}
 
 @app.get('/api/auth-check', dependencies=[Depends(authenticate)])
 def auth_check():
@@ -161,6 +165,16 @@ def auth_check():
 
 @app.post('/api/jobs', dependencies=[Depends(authenticate)])
 def create_job(data: Download, request: Request):
+    return enqueue_job(data)
+
+@app.post('/api/public/jobs')
+def create_public_job(data: Download, request: Request):
+    if not PUBLIC_DOWNLOADS:
+        raise HTTPException(403, 'เซิร์ฟเวอร์นี้ยังไม่ได้เปิดดาวน์โหลดสาธารณะ')
+    client = request.client.host if request.client else 'unknown'
+    return enqueue_job(data, public=True, client=client)
+
+def enqueue_job(data: Download, public=False, client=None):
     url = validate_url(data.url)
     if data.format not in ('mp4', 'mp3') or data.quality not in ('1080', '720', '480', '360'):
         raise HTTPException(400, 'รูปแบบไฟล์หรือคุณภาพไม่ถูกต้อง')
@@ -169,8 +183,21 @@ def create_job(data: Download, request: Request):
         # Global cap bounds queue, CPU and storage even behind a reverse proxy.
         if sum(v['status'] in ('queued', 'processing') for v in jobs.values()) >= 4 or len(jobs) >= 20:
             raise HTTPException(429, 'เซิร์ฟเวอร์มีงานเต็ม กรุณาลองใหม่ภายหลัง')
+        now = time.time()
+        if public:
+            # Bound both per-client requests and the rate-limit table itself.
+            for key, attempts in list(public_requests.items()):
+                recent = [t for t in attempts if now - t < PUBLIC_RATE_WINDOW]
+                if recent:
+                    public_requests[key] = recent
+                else:
+                    public_requests.pop(key)
+            recent = public_requests.get(client, [])
+            if len(recent) >= PUBLIC_RATE_LIMIT or client not in public_requests and len(public_requests) >= 1000:
+                raise HTTPException(429, 'มีคำขอดาวน์โหลดมากเกินไป กรุณารอประมาณ 10 นาทีแล้วลองใหม่')
+            public_requests[client] = recent + [now]
         job_id = secrets.token_urlsafe(32)
-        jobs[job_id] = {'status': 'queued', 'created': time.time()}
+        jobs[job_id] = {'status': 'queued', 'created': now, 'public': public}
     pool.submit(process, job_id, data, url)
     return {'id': job_id}
 
@@ -246,12 +273,22 @@ def process(job_id: str, data: Download, url: str):
 
 @app.get('/api/jobs/{job_id}', dependencies=[Depends(authenticate)])
 def get_job(job_id: str):
+    return job_response(job_id)
+
+@app.get('/api/public/jobs/{job_id}')
+def get_public_job(job_id: str, response: Response):
+    if not PUBLIC_DOWNLOADS:
+        raise HTTPException(403, 'เซิร์ฟเวอร์นี้ยังไม่ได้เปิดดาวน์โหลดสาธารณะ')
+    response.headers['Cache-Control'] = 'no-store'
+    return job_response(job_id, public=True)
+
+def job_response(job_id: str, public=False):
     cleanup()
     with lock:
         job = jobs.get(job_id)
-        if not job:
+        if not job or public and not job.get('public'):
             raise HTTPException(404, 'ไม่พบงานหรือไฟล์หมดอายุแล้ว')
-        return {k:v for k,v in job.items() if k not in ('file', 'filename', 'created')}
+        return {k:v for k,v in job.items() if k not in ('file', 'filename', 'created', 'public')}
 
 @app.get('/api/files/{job_id}')
 def file(job_id: str):
