@@ -1,4 +1,4 @@
-"""ClipKeep API. Run behind HTTPS. Requires CLIPKEEP_API_KEY and CORS_ORIGINS."""
+"""KlipNivo API. Run behind HTTPS. Requires CLIPKEEP_API_KEY and CORS_ORIGINS."""
 import hmac
 import logging
 import os
@@ -49,7 +49,7 @@ jobs = {}
 public_requests = {}
 lock = threading.Lock()
 pool = ThreadPoolExecutor(max_workers=2)
-app = FastAPI(title='ClipKeep', docs_url=None, redoc_url=None)
+app = FastAPI(title='KlipNivo', docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=['GET', 'POST'], allow_headers=['Content-Type', 'Authorization'])
 
 class Download(BaseModel):
@@ -256,9 +256,9 @@ def process(job_id: str, data: Download, url: str):
         file = files[0]
         if file.stat().st_size > MAX_FILE_BYTES:
             raise DownloadFailure('file_too_large')
-        title = str(info.get('title') or 'ClipKeep video')[:200]
+        title = str(info.get('title') or 'KlipNivo video')[:200]
         with lock:
-            jobs[job_id].update(status='ready', title=title, duration=info.get('duration'), height=info.get('height'), file=str(file), filename='clipkeep-' + job_id[:8] + '.' + data.format, download_url='/api/files/' + job_id)
+            jobs[job_id].update(status='ready', title=title, duration=info.get('duration'), height=info.get('height'), file=str(file), filename='klipnivo-' + job_id[:8] + '.' + data.format, download_url='/api/files/' + job_id)
     except Exception as exc:
         code = error_code(exc)
         # Keep diagnostics useful without exposing API keys or signed media URLs.
