@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: clipkeep-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: CLIPKEEP_API_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://clipkeep-th-8m4q.exact-jam-3580.chatgpt.site
