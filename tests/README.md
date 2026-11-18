@@ -1,7 +1,7 @@
 Run from the repository root with backend requirements, httpx, FFmpeg, ffprobe, Node, and an existing Playwright/Chromium installation:
 
     python -m unittest discover -s tests -p 'test_*.py'
-    node --test tests/test_frontend_auth.cjs
+    node --test tests/test_frontend_auth.cjs tests/test_batch_state.cjs
     python tests/batch_fixture_server.py
     node tests/test_batch_browser.cjs  # second terminal
 

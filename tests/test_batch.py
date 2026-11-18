@@ -78,6 +78,16 @@ class BatchTests(unittest.TestCase):
         server.cleanup();self.assertIn(data['id'],server.batches)
         batch['finished']=time.time()-server.TTL-1;server.cleanup()
         self.assertNotIn(data['id'],server.batches)
+    def test_full_disk_marks_job_failed_and_settles_batch(self):
+        import errno
+        data=self.batch([URL]);item=data['items'][0]
+        selection=server.Download(url=URL)
+        with patch.object(Path,'mkdir',side_effect=OSError(errno.ENOSPC,'No space left on device')):
+            server.process(item['id'],selection,URL)
+        result=self.client.get('/api/public/batches/'+data['id']).json()
+        self.assertTrue(result['finished'])
+        self.assertEqual(result['items'][0]['error_code'],'storage_limit')
+
     def test_real_attachments_unique_names_range_and_streaming_zip(self):
         data=self.batch([URL]*12)
         for i,item in enumerate(data['items'],1):

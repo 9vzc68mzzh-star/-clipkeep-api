@@ -1,6 +1,7 @@
 """KlipNivo API. Run behind HTTPS. Requires CLIPKEEP_API_KEY and CORS_ORIGINS."""
 import io
 import zipfile
+import errno
 import hmac
 import logging
 import os
@@ -89,6 +90,8 @@ class DownloadFailure(Exception):
 def error_code(exc):
     if isinstance(exc, (DownloadFailure, MediaError)):
         return exc.code
+    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+        return 'storage_limit'
     detail = str(exc).lower()
     if 'file_too_large' in detail or 'larger than max-filesize' in detail:
         return 'file_too_large'
@@ -427,7 +430,6 @@ def cancel_public_batch(batch_id: str):
 
 def process(job_id: str, data: Download, url: str):
     folder = ROOT / job_id
-    folder.mkdir(exist_ok=True)
     deadline = time.monotonic() + 1200
     last_report = [0.0]
 
@@ -513,6 +515,7 @@ def process(job_id: str, data: Download, url: str):
     with lock:
         jobs[job_id].update(status='processing', stage='resolving', progress=1)
     try:
+        folder.mkdir(exist_ok=True)
         check()
         url = resolve_facebook_share(url)
         with yt_dlp.YoutubeDL(opts) as ydl:

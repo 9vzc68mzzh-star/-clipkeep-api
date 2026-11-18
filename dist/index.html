@@ -71,7 +71,7 @@
 <div id="batch-list" class="batch-list"></div>
 <div class="batch-save-actions"><button type="button" id="zip-all" class="primary-btn" disabled>ดาวน์โหลดทั้งหมดเป็น ZIP</button><button type="button" id="save-selected" class="secondary-btn" disabled>ส่งไฟล์ที่เลือกอีกครั้ง</button><button type="button" id="prepare-share" class="secondary-btn" hidden>เตรียมบันทึกผ่านเมนูแชร์</button><button type="button" id="share-files" class="primary-btn" hidden>บันทึกทั้งหมด · Save to Files</button></div>
 <p id="save-location" class="save-location" role="status" aria-live="polite"></p>
-<p class="batch-save-note">ไฟล์พร้อมแล้วจะส่งเป็นการดาวน์โหลดอัตโนมัติ หากเบราว์เซอร์ถามให้อนุญาตหลายไฟล์ ใช้ ZIP หากบางไฟล์ไม่เริ่มดาวน์โหลด · ไฟล์บนเซิร์ฟเวอร์เก็บ 1 ชั่วโมงหลังจบชุด</p>
+<p class="batch-save-note">ไฟล์พร้อมแล้วจะส่งเป็นการดาวน์โหลดอัตโนมัติ หากเบราว์เซอร์ถามให้อนุญาตหลายไฟล์ ใช้ ZIP หากบางไฟล์ไม่เริ่มดาวน์โหลด · เมนูแชร์รองรับรวมไม่เกิน 100 MB ต่อครั้ง · ไฟล์บนเซิร์ฟเวอร์เก็บ 1 ชั่วโมงหลังจบชุด</p>
 </section>
 <section class="device-save" aria-labelledby="device-title">
 <div class="device-heading"><h2 id="device-title">คุณใช้อุปกรณ์อะไรบันทึกไฟล์?</h2><span>เลือกเพื่อดูวิธีบันทึก</span></div>
@@ -101,5 +101,5 @@
 
 <dialog id="clip-preview"><div class="dialog-top"><h2 id="preview-title">ดูคลิป</h2><button class="icon-btn" data-close="clip-preview" aria-label="ปิดตัวอย่าง">✕</button></div><video id="preview-video" controls playsinline preload="metadata" hidden></video><audio id="preview-audio" controls preload="metadata" hidden></audio></dialog>
 <script src="/app.js?v=klipnivo-batch-1"></script>
-<script src="/batch.js?v=1"></script>
+<script src="/batch.js?v=2"></script>
 </body></html>
