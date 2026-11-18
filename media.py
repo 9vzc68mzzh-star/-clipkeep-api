@@ -74,7 +74,11 @@ def normalize(source, folder, kind, height, check, report, encoder_lock, max_byt
                             raise MediaError('file_too_large')
                         if duration and progress_path.exists():
                             values = dict(line.split('=', 1) for line in progress_path.read_text().splitlines() if '=' in line)
-                            seconds = int(values.get('out_time_us', '0')) / 1_000_000
+                            try:
+                                seconds = max(0, float(values.get('out_time_us') or 0)) / 1_000_000
+                            except ValueError:
+                                # FFmpeg may report N/A before its first output packet.
+                                seconds = 0
                             report('converting', min(97, 82 + seconds / duration * 15))
                         time.sleep(.3)
                     if process.returncode:

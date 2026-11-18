@@ -115,6 +115,24 @@ class MediaTests(unittest.TestCase):
         output,d,r=self.convert(FIXTURES/'incompatible.webm')
         self.assertEqual((d['video_codec'],d['audio_codec']),('h264','aac'))
         self.assertTrue(r)
+    def test_ffmpeg_na_progress_does_not_abort_a_valid_conversion(self):
+        from unittest.mock import patch
+        original=subprocess.Popen
+        reads=[]
+        def started(command, **kwargs):
+            if '-progress' not in command:
+                return original(command, **kwargs)
+            progress=Path(command[command.index('-progress')+1])
+            progress.write_text('out_time_us=N/A\nprogress=continue\n')
+            return original(command, **kwargs)
+        def pending_progress(path, *args, **kwargs):
+            reads.append(str(path))
+            return 'out_time_us=N/A\nprogress=continue\n'
+        with patch('media.subprocess.Popen', side_effect=started), patch.object(Path,'read_text',pending_progress):
+            _,details,_=self.convert(FIXTURES/'incompatible.webm')
+        self.assertEqual((details['video_codec'],details['audio_codec']),('h264','aac'))
+        self.assertTrue(reads)
+
     def test_mp3_has_playable_audio(self):
         _,d,_=self.convert(FIXTURES/'compatible.mp4','mp3')
         self.assertEqual(d['audio_codec'],'mp3')

@@ -332,7 +332,7 @@ def enqueue_batch(data, public, client):
 
 JOB_FIELDS = ('status', 'stage', 'progress', 'title', 'thumbnail', 'duration', 'height',
               'download_url', 'preview_url', 'filename', 'size', 'error', 'error_code',
-              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url')
+              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type')
 
 
 def batch_response(batch_id, public=False):
@@ -545,7 +545,7 @@ def process(job_id: str, data: Download, url: str):
         with lock:
             jobs[job_id].update(status='cancelled' if code == 'cancelled' else 'error',
                                stage='cancelled' if code == 'cancelled' else 'failed',
-                               error=ERROR_MESSAGES[code], error_code=code, finished=time.time())
+                               error=ERROR_MESSAGES[code], error_code=code, error_type=type(exc).__name__, finished=time.time())
         shutil.rmtree(folder, ignore_errors=True)
     finally:
         with lock:
