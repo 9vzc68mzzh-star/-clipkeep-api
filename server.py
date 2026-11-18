@@ -40,6 +40,7 @@ ERROR_MESSAGES = {
     'access_restricted': 'Facebook หรือ YouTube ปฏิเสธการเข้าถึงคลิปจากเซิร์ฟเวอร์ คลิปอาจต้องเข้าสู่ระบบหรือมีข้อจำกัดการรับชม',
     'rate_limited': 'แพลตฟอร์มจำกัดจำนวนคำขอชั่วคราว กรุณารอสักครู่แล้วลองใหม่',
     'format_unavailable': 'คลิปนี้ไม่มีไฟล์ในคุณภาพที่เลือก กรุณาลองคุณภาพอื่น',
+    'audio_unavailable': 'ไม่พบแทร็กเสียงที่แปลงเป็น MP3 ได้จากคลิปนี้ กรุณาเลือกวิดีโอ MP4 หรือลองคลิปอื่น',
     'extractor_error': 'ตัวดาวน์โหลดยังอ่านข้อมูลคลิปนี้ไม่ได้ กรุณาลองลิงก์วิดีโอโดยตรงหรืออัปเดตเซิร์ฟเวอร์',
     'network_error': 'เซิร์ฟเวอร์ติดต่อแพลตฟอร์มวิดีโอไม่สำเร็จ กรุณาลองใหม่ภายหลัง',
     'download_failed': 'ดาวน์โหลดคลิปนี้ไม่สำเร็จ กรุณาลองคลิปสาธารณะอื่น หากยังไม่ได้ให้ตรวจ Logs ของเซิร์ฟเวอร์',
@@ -80,6 +81,8 @@ def error_code(exc):
         return 'share_link'
     if 'requested format is not available' in detail:
         return 'format_unavailable'
+    if 'unable to obtain file audio codec' in detail:
+        return 'audio_unavailable'
     if any(s in detail for s in ('cannot parse data', 'unable to extract', 'no video formats found')):
         return 'extractor_error'
     if isinstance(exc, (URLError, TimeoutError)) or any(s in detail for s in ('timed out', 'unable to download', 'connection refused', 'connection reset')):
