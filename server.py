@@ -2,6 +2,8 @@
 import io
 import zipfile
 import errno
+import multiprocessing
+import signal
 import hmac
 import logging
 import os
@@ -19,6 +21,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 import yt_dlp
 from yt_dlp.extractor.facebook import FacebookIE, FacebookReelIE
@@ -38,6 +41,9 @@ PUBLIC_RATE_WINDOW = 600
 PUBLIC_RATE_LIMIT = 5  # Per batch, not per clip.
 MAX_BATCH_LINKS = 200
 MAX_ACTIVE_BATCHES = 2
+STALL_SECONDS = 75
+DELIVERY_SECONDS = 75
+ATTEMPT_SECONDS = 1200
 MAX_STORED_BYTES = 4 * 1024 * 1024 * 1024
 TTL = 3600
 FACEBOOK_HOSTS = ('facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.watch')
@@ -46,6 +52,8 @@ ERROR_MESSAGES = {
     'file_too_large': 'ไฟล์เกินขนาดสูงสุด 512 MB กรุณาเลือกคุณภาพ 720p หรือ 480p แล้วลองใหม่',
     'duration_limit': 'คลิปยาวเกิน 2 ชั่วโมง กรุณาเลือกคลิปที่สั้นกว่า',
     'live_video': 'ยังไม่รองรับคลิปที่กำลังถ่ายทอดสด กรุณารอให้การถ่ายทอดจบก่อน',
+    'stalled': 'ไม่มีความคืบหน้าเกิน 75 วินาที จึงหยุดคลิปนี้และไปคลิปถัดไป',
+    'delivery_timeout': 'ไฟล์พร้อมแล้วแต่ยังส่งไปยังเบราว์เซอร์ไม่ได้ กรุณาใช้ ZIP หรือบันทึกไฟล์อีกครั้ง',
     'time_limit': 'การดาวน์โหลดใช้เวลานานเกินกำหนด กรุณาลองใหม่หรือเลือกคุณภาพต่ำลง',
     'access_restricted': 'Facebook หรือ YouTube ปฏิเสธการเข้าถึงคลิปจากเซิร์ฟเวอร์ คลิปอาจต้องเข้าสู่ระบบหรือมีข้อจำกัดการรับชม',
     'rate_limited': 'แพลตฟอร์มจำกัดจำนวนคำขอชั่วคราว กรุณารอสักครู่แล้วลองใหม่',
@@ -66,7 +74,7 @@ batches = {}
 futures = {}
 public_requests = {}
 lock = threading.RLock()
-pool = ThreadPoolExecutor(max_workers=3)
+pool = ThreadPoolExecutor(max_workers=1)
 encoder_lock = threading.Semaphore(1)
 app = FastAPI(title='KlipNivo', docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=['GET', 'POST'], allow_headers=['Content-Type', 'Authorization'], expose_headers=['Content-Disposition', 'Content-Length', 'Accept-Ranges'])
@@ -171,7 +179,7 @@ def validate_url(value: str) -> str:
     raise HTTPException(400, 'รองรับเฉพาะลิงก์วิดีโอ Facebook และ YouTube ที่ถูกต้อง')
 
 def settled(job):
-    return job['status'] in ('ready', 'error', 'cancelled')
+    return job['status'] in ('error', 'cancelled') or job['status'] == 'ready' and (not job.get('batch_id') or job.get('delivery_status') == 'sent')
 
 
 def finish_batch(batch_id):
@@ -225,11 +233,12 @@ def janitor():
     while True:
         time.sleep(60)
         cleanup()
-threading.Thread(target=janitor, daemon=True).start()
+if multiprocessing.current_process().name == 'MainProcess':
+    threading.Thread(target=janitor, daemon=True).start()
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 4, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 3}
+    return {'service': 'clipkeep', 'version': 5, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True}
 
 @app.get('/', include_in_schema=False)
 def homepage():
@@ -272,7 +281,7 @@ def enqueue_job(data: Download, public=False, client=None):
 def new_job(data, url, public, batch_id=None, index=1):
     return {'status': 'queued', 'stage': 'waiting', 'progress': 0, 'created': time.time(),
             'public': public, 'url': url, 'selection': data.model_dump(),
-            'batch_id': batch_id, 'index': index, 'attempt': 1, 'cancel': False}
+            'batch_id': batch_id, 'index': index, 'attempt': 1, 'auto_retry': 0, 'cancel': False}
 
 
 def require_public():
@@ -335,7 +344,7 @@ def enqueue_batch(data, public, client):
 
 JOB_FIELDS = ('status', 'stage', 'progress', 'title', 'thumbnail', 'duration', 'height',
               'download_url', 'preview_url', 'filename', 'size', 'error', 'error_code',
-              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type')
+              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type', 'auto_retry', 'delivery_status', 'file_ready')
 
 
 def batch_response(batch_id, public=False):
@@ -345,8 +354,10 @@ def batch_response(batch_id, public=False):
             raise HTTPException(404, 'ไม่พบชุดดาวน์โหลดหรือไฟล์หมดอายุแล้ว')
         items = [dict(id=j, **{k: jobs[j][k] for k in JOB_FIELDS if k in jobs[j]}) for j in batch['ids']]
         return {'id': batch_id, 'items': items, 'finished': bool(batch.get('finished')),
-                'total': len(items), 'ready': sum(j['status'] == 'ready' for j in items),
-                'failed': sum(j['status'] == 'error' for j in items), 'parallel': 3,
+                'total': len(items), 'ready': sum(j['status'] == 'ready' and j.get('delivery_status') == 'sent' for j in items),
+                'failed': sum(j['status'] == 'error' for j in items), 'parallel': 1,
+                'prepared': sum(bool(j.get('file_ready')) for j in items),
+                'active_index': next((j['index'] for j in items if j['status'] == 'processing' or j['status'] == 'ready' and j.get('delivery_status') != 'sent'), None),
                 'archive_url': '/api/archives/' + batch_id,
                 'expires_in': max(0, int(TTL - (time.time() - batch['finished']))) if batch.get('finished') else None}
 
@@ -428,9 +439,9 @@ def cancel_public_batch(batch_id: str):
     return change_batch(batch_id, 'cancel', True)
 
 
-def process(job_id: str, data: Download, url: str):
+def prepare(job_id: str, data: Download, url: str, emit=lambda event: None):
     folder = ROOT / job_id
-    deadline = time.monotonic() + 1200
+    deadline = time.monotonic() + ATTEMPT_SECONDS
     last_report = [0.0]
 
     def check():
@@ -450,15 +461,30 @@ def process(job_id: str, data: Download, url: str):
             if used > MAX_STORED_BYTES or shutil.disk_usage(ROOT).free < 96 * 1024 * 1024:
                 raise DownloadFailure('storage_limit')
 
-    def report(stage, percent):
+    report_state = [None, 0, None, 0.0]
+    def notify(kind='update', progressed=False):
+        emit({'kind':kind, 'fields':{k:v for k,v in jobs[job_id].items() if k in (*JOB_FIELDS, 'file', 'finished')},
+              'progressed':progressed})
+
+    def report(stage, percent, activity=None):
+        now = time.monotonic()
+        changed = stage != report_state[0] or percent > report_state[1] or activity is not None and activity != report_state[2]
+        if not changed or stage == report_state[0] and now - report_state[3] < .25:
+            return
+        report_state[:] = [stage, percent, activity, now]
         with lock:
             job = jobs[job_id]
             job.update(stage=stage, progress=round(max(job.get('progress', 0), percent), 1))
+        notify(progressed=True)
 
     def metadata(info):
+        values = {'title':str(info.get('title') or 'คลิปของคุณ')[:200],
+                  'thumbnail':info.get('thumbnail'), 'duration':info.get('duration')}
+        changed = any(jobs[job_id].get(k) != v for k,v in values.items())
         with lock:
-            jobs[job_id].update(title=str(info.get('title') or 'คลิปของคุณ')[:200],
-                               thumbnail=info.get('thumbnail'), duration=info.get('duration'))
+            jobs[job_id].update(values)
+        if changed:
+            notify(progressed=True)
 
     def progress(info):
         check()
@@ -468,7 +494,7 @@ def process(job_id: str, data: Download, url: str):
             metadata(info['info_dict'])
         total = info.get('total_bytes') or info.get('total_bytes_estimate')
         percent = min(76, info.get('downloaded_bytes', 0) / total * 72 + 4) if total else 5
-        report('downloading' if info['status'] == 'downloading' else 'merging', percent)
+        report('downloading' if info['status'] == 'downloading' else 'merging', percent, (info.get('filename'), info.get('downloaded_bytes', 0)))
 
     def check_media(info, **kwargs):
         check()
@@ -494,7 +520,7 @@ def process(job_id: str, data: Download, url: str):
     opts = {
         'outtmpl': str(folder / 'source.%(ext)s'), 'noplaylist': True,
         'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
-        'retries': 2, 'fragment_retries': 2, 'max_filesize': MAX_FILE_BYTES,
+        'retries': 0, 'fragment_retries': 0, 'max_filesize': MAX_FILE_BYTES,
         'cachedir': False, 'restrictfilenames': True,
         'js_runtimes': {'node': {}}, 'progress_hooks': [progress],
         'match_filter': check_media, 'logger': DownloaderLogger(),
@@ -535,7 +561,9 @@ def process(job_id: str, data: Download, url: str):
         readable = readable.encode('utf-8')[:160].decode('utf-8', 'ignore')
         filename = f"{jobs[job_id]['index']:03d}-{readable}-{job_id[:8]}.{data.format}"
         with lock:
-            jobs[job_id].update(status='ready', stage='done', progress=100, title=title,
+            jobs[job_id].update(status='ready', stage='sending' if jobs[job_id].get('batch_id') else 'done',
+                               progress=99 if jobs[job_id].get('batch_id') else 100, file_ready=True,
+                               delivery_status='waiting' if jobs[job_id].get('batch_id') else 'sent', title=title,
                                file=str(output), filename=filename, size=output.stat().st_size,
                                download_url='/api/files/' + job_id, preview_url='/api/preview/' + job_id,
                                finished=time.time(), **media)
@@ -551,8 +579,150 @@ def process(job_id: str, data: Download, url: str):
                                error=ERROR_MESSAGES[code], error_code=code, error_type=type(exc).__name__, finished=time.time())
         shutil.rmtree(folder, ignore_errors=True)
     finally:
+        notify('result', progressed=True)
+
+
+def prepare_worker(job_id, selection, url, initial, root, connection):
+    # Isolate blocking extractors and FFmpeg so the supervisor can stop them.
+    os.setsid()
+    global ROOT
+    ROOT = Path(root)
+    jobs[job_id] = initial
+    try:
+        prepare(job_id, Download(**selection), url, connection.send)
+    finally:
+        connection.close()
+
+
+def stop_worker(worker):
+    if worker.is_alive():
+        try:
+            os.killpg(worker.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            worker.kill()
+    worker.join(timeout=2)
+
+
+def run_attempt(job_id, data, url):
+    context = multiprocessing.get_context('spawn')
+    receive, send = context.Pipe(duplex=False)
+    worker = context.Process(target=prepare_worker,
+                             args=(job_id, data.model_dump(), url, jobs[job_id].copy(), str(ROOT), send))
+    started = last_progress = time.monotonic()
+    try:
+        worker.start()
+        send.close()
+        while True:
+            if jobs[job_id].get('cancel'):
+                raise DownloadFailure('cancelled')
+            now = time.monotonic()
+            if now - last_progress > STALL_SECONDS:
+                raise DownloadFailure('stalled')
+            if now - started > ATTEMPT_SECONDS:
+                raise DownloadFailure('time_limit')
+            if receive.poll(.2):
+                try:
+                    event = receive.recv()
+                except EOFError:
+                    raise DownloadFailure('download_failed') from None
+                if event['kind'] == 'result' and event['fields']['status'] in ('error', 'cancelled'):
+                    raise DownloadFailure(event['fields']['error_code'])
+                with lock:
+                    jobs[job_id].update(event['fields'])
+                if event.get('progressed'):
+                    last_progress = time.monotonic()
+                if event['kind'] == 'result':
+                    return
+            elif not worker.is_alive():
+                raise DownloadFailure('download_failed')
+    finally:
+        if worker.pid:
+            stop_worker(worker)
+        receive.close()
+        send.close()
+
+
+def mark_sent(job_id, attempt=None):
+    with lock:
+        job = jobs.get(job_id)
+        if not job or not job.get('file_ready') or job.get('cancel'):
+            return False
+        if attempt is not None and job['attempt'] != attempt:
+            return False
+        if job['status'] == 'ready':
+            job.update(delivery_status='sent', stage='done', progress=100, finished=time.time())
+            finish_batch(job.get('batch_id'))
+            return True
+    return False
+
+
+class Sent(BaseModel):
+    id: str = Field(max_length=100)
+    attempt: int = Field(ge=1)
+
+
+def acknowledge(batch_id, data, public=False):
+    with lock:
+        batch_response(batch_id, public)
+        if data.id not in batches[batch_id]['ids'] or not mark_sent(data.id, data.attempt):
+            raise HTTPException(409, 'ไฟล์ยังไม่พร้อมหรือเป็นคำขอจากครั้งก่อน กรุณาเช็กคิวอีกครั้ง')
+        return {'ok': True}
+
+
+@app.post('/api/public/batches/{batch_id}/sent')
+def public_sent(batch_id: str, data: Sent):
+    require_public()
+    return acknowledge(batch_id, data, True)
+
+
+@app.post('/api/batches/{batch_id}/sent', dependencies=[Depends(authenticate)])
+def private_sent(batch_id: str, data: Sent):
+    return acknowledge(batch_id, data)
+
+
+def process(job_id: str, data: Download, url: str):
+    # Keep the single executor slot through preparation and delivery dispatch.
+    for automatic in range(2):
         with lock:
-            finish_batch(jobs[job_id].get('batch_id'))
+            job = jobs[job_id]
+            if automatic:
+                job['attempt'] += 1
+                job.update(auto_retry=1, status='processing', stage='retrying', progress=0)
+                for key in ('error', 'error_code', 'error_type', 'finished'):
+                    job.pop(key, None)
+            else:
+                job.update(status='processing', stage='resolving', progress=1)
+        try:
+            if job.get('cancel'):
+                raise DownloadFailure('cancelled')
+            if not job.get('file_ready'):
+                run_attempt(job_id, data, url)
+            elif automatic:
+                job.update(status='ready', stage='sending', progress=99, delivery_status='waiting')
+            if job['status'] == 'error':
+                raise DownloadFailure(job['error_code'])
+            if job.get('batch_id') and job['status'] == 'ready':
+                deadline = time.monotonic() + DELIVERY_SECONDS
+                while job.get('delivery_status') != 'sent':
+                    if job.get('cancel'):
+                        raise DownloadFailure('cancelled')
+                    if time.monotonic() > deadline:
+                        raise DownloadFailure('delivery_timeout')
+                    time.sleep(.1)
+            break
+        except Exception as exc:
+            code = error_code(exc)
+            retrying = automatic == 0 and code != 'cancelled'
+            with lock:
+                job.update(status='processing' if retrying else 'cancelled' if code == 'cancelled' else 'error',
+                           stage='retrying' if retrying else 'cancelled' if code == 'cancelled' else 'failed',
+                           error=None if retrying else ERROR_MESSAGES[code], error_code=code, finished=time.time())
+            if not job.get('file_ready'):
+                shutil.rmtree(ROOT / job_id, ignore_errors=True)
+            if code == 'cancelled' or automatic == 1:
+                break
+    with lock:
+        finish_batch(jobs[job_id].get('batch_id'))
 
 
 @app.get('/api/jobs/{job_id}', dependencies=[Depends(authenticate)])
@@ -578,7 +748,7 @@ def ready_file(job_id):
     cleanup()
     with lock:
         job = jobs.get(job_id, {}).copy()
-    if job.get('status') != 'ready' or not Path(job['file']).is_file():
+    if not job.get('file_ready', job.get('status') == 'ready') or not Path(job['file']).is_file():
         raise HTTPException(404, 'ไม่พบไฟล์หรือไฟล์หมดอายุแล้ว')
     return job
 
@@ -587,7 +757,7 @@ def ready_file(job_id):
 def file(job_id: str):
     # Capability URL; proper attachment + filename works across origins, including Safari.
     job = ready_file(job_id)
-    return FileResponse(job['file'], filename=job['filename'], media_type='audio/mpeg' if job['file'].endswith('.mp3') else 'video/mp4',
+    return FileResponse(job['file'], filename=job['filename'], background=BackgroundTask(mark_sent, job_id, job.get('attempt')), media_type='audio/mpeg' if job['file'].endswith('.mp3') else 'video/mp4',
                         headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
 
 
@@ -629,7 +799,7 @@ def archive(batch_id: str, items: str = ''):
             indexes = {int(i) for i in items.split(',')} if items else None
         except ValueError:
             raise HTTPException(400, 'รายการไฟล์ไม่ถูกต้อง') from None
-        selected = [jobs[j].copy() for j in batch['ids'] if jobs[j]['status'] == 'ready'
+        selected = [jobs[j].copy() for j in batch['ids'] if jobs[j].get('file_ready', jobs[j]['status'] == 'ready')
                     and (indexes is None or jobs[j]['index'] in indexes)]
         if not selected:
             raise HTTPException(409, 'ยังไม่มีไฟล์พร้อมบันทึก')
