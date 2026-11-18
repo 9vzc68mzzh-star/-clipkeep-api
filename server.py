@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request as URLRequest, build_opener
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import yt_dlp
@@ -22,6 +22,9 @@ from yt_dlp.extractor.facebook import FacebookIE, FacebookReelIE
 
 API_KEY = os.environ.get('CLIPKEEP_API_KEY', '')
 ORIGINS = [s.strip() for s in os.environ.get('CORS_ORIGINS', '').split(',') if s.strip()]
+PUBLIC_SITE_ORIGIN = os.environ.get('PUBLIC_SITE_ORIGIN', '').rstrip('/')
+if PUBLIC_SITE_ORIGIN and PUBLIC_SITE_ORIGIN not in ORIGINS:
+    ORIGINS.append(PUBLIC_SITE_ORIGIN)
 ROOT = Path('/tmp/clipkeep')
 ROOT.mkdir(exist_ok=True)
 MAX_FILE_BYTES = 512 * 1024 * 1024
@@ -161,6 +164,14 @@ threading.Thread(target=janitor, daemon=True).start()
 @app.get('/api/health')
 def health():
     return {'service': 'clipkeep', 'version': 3, 'public_downloads': PUBLIC_DOWNLOADS}
+
+@app.get('/', include_in_schema=False)
+def homepage():
+    if PUBLIC_SITE_ORIGIN:
+        return RedirectResponse(PUBLIC_SITE_ORIGIN + '/', status_code=302, headers={'Cache-Control':'no-store'})
+    if static.exists():
+        return FileResponse(static / 'index.html', media_type='text/html')
+    raise HTTPException(404, 'ไม่พบหน้าเว็บ')
 
 @app.get('/api/auth-check', dependencies=[Depends(authenticate)])
 def auth_check():

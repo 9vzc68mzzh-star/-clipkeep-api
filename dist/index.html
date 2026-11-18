@@ -5,13 +5,13 @@
 <title>KlipNivo คลิปนีโว — ดาวน์โหลดคลิป Facebook และ YouTube</title>
 <meta name="description" content="KlipNivo คลิปนีโว วางลิงก์ Facebook หรือ YouTube เพื่อดาวน์โหลด MP4 และ MP3 พร้อมวิธีบันทึกสำหรับ iPhone, Android, iPad และคอมพิวเตอร์">
 <meta name="theme-color" content="#081410">
-<link rel="canonical" href="https://clipkeep-api.onrender.com/">
-<meta property="og:type" content="website"><meta property="og:locale" content="th_TH"><meta property="og:site_name" content="KlipNivo คลิปนีโว"><meta property="og:title" content="KlipNivo — คลิปที่ใช่ เก็บไว้กับคุณ"><meta property="og:description" content="ดาวน์โหลดวิดีโอ MP4 หรือเสียง MP3 จาก Facebook และ YouTube พร้อมวิธีบันทึกสำหรับอุปกรณ์ของคุณ"><meta property="og:url" content="https://clipkeep-api.onrender.com/">
+<link rel="canonical" href="https://klipnivo.onrender.com/">
+<meta property="og:type" content="website"><meta property="og:locale" content="th_TH"><meta property="og:site_name" content="KlipNivo คลิปนีโว"><meta property="og:title" content="KlipNivo — คลิปที่ใช่ เก็บไว้กับคุณ"><meta property="og:description" content="ดาวน์โหลดวิดีโอ MP4 หรือเสียง MP3 จาก Facebook และ YouTube พร้อมวิธีบันทึกสำหรับอุปกรณ์ของคุณ"><meta property="og:url" content="https://klipnivo.onrender.com/">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Aref+Ruqaa:wght@400;700&family=Cormorant+Garamond:wght@600&family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="icon" href="/assets/klipnivo-mark.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/style.css?v=klipnivo-1">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"KlipNivo","alternateName":"คลิปนีโว","url":"https://clipkeep-api.onrender.com/"}</script>
+<link rel="stylesheet" href="/style.css?v=klipnivo-2">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"KlipNivo","alternateName":"คลิปนีโว","url":"https://klipnivo.onrender.com/"}</script>
 </head>
 <body>
 <svg class="svg-library" xmlns="http://www.w3.org/2000/svg"><defs>
@@ -54,7 +54,7 @@
 </div>
 <div class="hero-workspace">
 <div class="download-card">
-<div class="card-heading"><strong>เริ่มเก็บคลิปโปรด</strong><span class="ready-tag"><span class="status-dot"></span>พร้อมรับลิงก์ของคุณ</span></div>
+<div class="card-heading"><strong>เริ่มเก็บคลิปโปรด</strong><span class="ready-tag warming" id="backend-ready"><span class="status-dot"></span><span id="backend-status">กำลังเตรียมระบบ</span></span></div>
 <div class="card-tabs" role="tablist" aria-label="เลือกแพลตฟอร์ม"><button class="tab selected" role="tab" aria-selected="true" data-platform="all"><svg aria-hidden="true"><use href="#i-link"/></svg>ทั้งหมด</button><button class="tab" role="tab" aria-selected="false" data-platform="youtube"><svg class="yt" aria-hidden="true"><use href="#i-youtube"/></svg>YouTube</button><button class="tab" role="tab" aria-selected="false" data-platform="facebook"><svg class="fb" aria-hidden="true"><use href="#i-facebook"/></svg>Facebook</button></div>
 <form id="download-form" novalidate>
 <label class="input-label" for="video-url">ลิงก์คลิปที่อยากเก็บ <span id="detected"></span></label>
@@ -89,5 +89,5 @@
 <dialog id="confirm-dialog"><div class="dialog-top"><h2>ล้างประวัติทั้งหมด?</h2><button class="icon-btn" data-close="confirm-dialog" aria-label="ปิด"><svg><use href="#i-close"/></svg></button></div><p>ล้างรายการคลิปในเบราว์เซอร์นี้ ไฟล์ที่ดาวน์โหลดไว้ยังอยู่ในอุปกรณ์ของคุณ</p><div class="dialog-actions"><button class="secondary-btn" data-close="confirm-dialog">ยกเลิก</button><button class="primary-btn" id="confirm-clear">ล้างประวัติ</button></div></dialog>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="/app.js?v=klipnivo-1"></script>
+<script src="/app.js?v=klipnivo-2"></script>
 </body></html>

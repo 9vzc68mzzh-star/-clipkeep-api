@@ -11,6 +11,8 @@ services:
         generateValue: true
       - key: CORS_ORIGINS
         value: https://clipkeep-th-8m4q.exact-jam-3580.chatgpt.site
+      - key: PUBLIC_SITE_ORIGIN
+        value: https://klipnivo.onrender.com
   - type: web
     name: klipnivo
     runtime: static

@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /api/
 Disallow: /openapi.json
-Sitemap: https://clipkeep-api.onrender.com/sitemap.xml
+Sitemap: https://klipnivo.onrender.com/sitemap.xml
