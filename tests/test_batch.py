@@ -82,7 +82,7 @@ class BatchTests(unittest.TestCase):
         import errno
         data=self.batch([URL]);item=data['items'][0]
         selection=server.Download(url=URL)
-        with patch.object(Path,'mkdir',side_effect=OSError(errno.ENOSPC,'No space left on device')):
+        with patch.object(server,'run_attempt',side_effect=lambda job_id,data,url:server.prepare(job_id,data,url)), patch.object(Path,'mkdir',side_effect=OSError(errno.ENOSPC,'No space left on device')):
             server.process(item['id'],selection,URL)
         result=self.client.get('/api/public/batches/'+data['id']).json()
         self.assertTrue(result['finished'])

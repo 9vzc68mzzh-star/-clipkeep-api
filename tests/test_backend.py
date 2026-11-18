@@ -25,8 +25,11 @@ class BackendTests(unittest.TestCase):
         # Real codec inspection/conversion is covered separately in test_batch.py.
         self.normalizer = patch.object(server, 'normalize', side_effect=lambda source, *args: (source, {"height": None}))
         self.normalizer.start()
+        self.attempt=patch.object(server,'run_attempt',side_effect=lambda job_id,data,url:server.prepare(job_id,data,url))
+        self.attempt.start()
 
     def tearDown(self):
+        self.attempt.stop()
         self.normalizer.stop()
         with server.lock:
             ids = list(server.jobs)

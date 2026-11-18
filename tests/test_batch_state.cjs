@@ -21,7 +21,7 @@ function launch({session=storage(),apiHandler,fetchHandler}={}){
   navigator:{share:async()=>{},canShare:()=>true,clipboard:{readText:async()=>''}},location:{origin:'https://site.example'},
   setTimeout:(fn,ms)=>{const item={fn,ms};timers.push(item);return item;},clearTimeout:item=>{if(item)item.cancelled=true;},
   crypto:{randomUUID:()=>`request-${++uuid}`},apiBase:'https://backend.example',apiKey:'owner-key',format:'mp4',busy:false,records:[],
-  checkBackend:async()=>({batch_limit:200,public_downloads:true}),
+  checkBackend:async()=>({batch_limit:200,public_downloads:true,ordered_delivery:true}),
   api:async(path,options={},base,key)=>{requests.push({path,options,base,key});return apiHandler?apiHandler(path,options,base,key):snapshot([]);},
   saveAnchor:(url,name)=>saves.push({url,name}),message:text=>messages.push(text),toast:()=>{},persist:()=>{},parseLink:url=>({url,source:'youtube'}),
   download:()=>{},updateDetected:()=>{},renderSaveGuide:()=>{},DEVICE_GUIDES:{},
@@ -38,7 +38,7 @@ const post=options=>options.method==='POST';
 test('deselect all also deselects clips that finish later',async()=>{
  let read=0;const app=launch({apiHandler:(path,options)=>post(options)?snapshot([job(1),job(2,'queued')],false):snapshot([job(1),job(2)])});
  await app.start();app.$('#select-all').checked=false;await app.$('#select-all').emit('change');await app.tick(1500);
- assert.equal(app.$('#zip-all').disabled,true);assert.equal(app.rows()[1].querySelector('input').checked,false);
+ assert.equal(app.$('#zip-all').disabled,false);assert(app.$('#zip-all').textContent.includes('(2)'));assert.equal(app.rows()[1].querySelector('input').checked,false);
 });
 test('refresh restores the existing queue and does not resubmit or resend sent files',async()=>{
  const session=storage(),items=[job(1),job(2,'queued')];
