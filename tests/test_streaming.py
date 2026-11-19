@@ -98,6 +98,17 @@ class StreamingTests(unittest.TestCase):
                     rows=[{'clip':j['index'],'mode':j['mode'],**j['timings']} for j in items]
                     out=Path(os.environ.get('KLIPNIVO_TEST_DIR','/tmp/klipnivo-tests'));out.mkdir(exist_ok=True,parents=True)
                     (out/'stream-timings.json').write_text(json.dumps(rows,indent=2))
+                    audio_batch=client.post('/api/public/batches',json={'urls':[urls[0]],'streaming':True,'format':'mp3'}).json()
+                    for _ in range(200):
+                        audio_batch=client.get('/api/public/batches/'+audio_batch['id']).json()
+                        current=audio_batch['items'][0]
+                        if current.get('can_download'):
+                            audio_result=client.get(current['download_url']);audio_path=root/'audio.mp3';audio_path.write_bytes(audio_result.content)
+                            audio_info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(audio_path)]))
+                            self.assertTrue(any(stream['codec_name']=='mp3' for stream in audio_info['streams']))
+                            break
+                        time.sleep(.03)
+                    else:self.fail('streaming MP3 did not start')
                     print('STREAM PASS: 10 ordered files; bytes arrive before production completes; exactly one look-ahead; video packet hashes unchanged; all H.264/AAC LC decode; ZIP=10; no individual temp movies.',flush=True)
             finally:upstream.shutdown();upstream.server_close()
 
