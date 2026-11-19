@@ -3,7 +3,7 @@ const test=require('node:test'), assert=require('node:assert/strict'), vm=requir
 const source=fs.readFileSync('dist/batch.js','utf8');
 function storage(){const m=new Map();return {getItem:k=>m.get(k)??null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k),entries:()=>Object.fromEntries(m)};}
 function launch({session=storage(),apiHandler,fetchHandler}={}){
- const elements=new Map(),timers=[],requests=[],saves=[],messages=[];let uuid=0;
+ const elements=new Map(),timers=[],requests=[],saves=[],messages=[],fetches=[],shares=[];let uuid=0;
  class Element{
   constructor(tag='div'){this.tag=tag;this.hidden=false;this.disabled=false;this.checked=true;this.value='';this.dataset={};this.children=[];this.handlers={};this.parts=new Map();}
   set id(value){this._id=value;elements.set('#'+value,this);}get id(){return this._id;}
@@ -11,26 +11,26 @@ function launch({session=storage(),apiHandler,fetchHandler}={}){
   get innerHTML(){return this.html||'';}
   querySelector(selector){return this.parts.get(selector)||this.children.find(c=>c.tag===selector)||null;}
   append(el){this.children.push(el);}replaceChildren(){this.children=[];}
-  after(el){}focus(){}remove(){}load(){}pause(){}showModal(){this.open=true;}removeAttribute(){}
+  setAttribute(name,value){this[name]=value;}getAttribute(name){return this[name];}after(el){}focus(){}remove(){}load(){}pause(){}showModal(){this.open=true;}removeAttribute(name){delete this[name];}close(){this.open=false;}
   addEventListener(type,fn){(this.handlers[type]??=[]).push(fn);}removeEventListener(){}
   emit(type,extra={}){const event={target:this,preventDefault(){},...extra};return Promise.all([...(this.handlers[type]||[]).map(fn=>fn(event)),this['on'+type]?.(event)]);}
  }
  const $=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};$('#quality').value='720';
- const context=vm.createContext({$,console,URL,Blob,File,AbortController,AbortSignal,sessionStorage:session,
+ const context=vm.createContext({$,console,URL,Blob,File,Headers,AbortController,AbortSignal,sessionStorage:session,
   document:{createElement:tag=>new Element(tag),querySelector:$,querySelectorAll:()=>[],addEventListener(){}},
-  navigator:{share:async()=>{},canShare:()=>true,clipboard:{readText:async()=>''}},location:{origin:'https://site.example'},
+  navigator:{share:async data=>{shares.push(data);},canShare:()=>true,clipboard:{readText:async()=>''}},location:{origin:'https://site.example'},
   setTimeout:(fn,ms)=>{const item={fn,ms};timers.push(item);return item;},clearTimeout:item=>{if(item)item.cancelled=true;},
   crypto:{randomUUID:()=>`request-${++uuid}`},apiBase:'https://backend.example',apiKey:'owner-key',format:'mp4',busy:false,records:[],
   checkBackend:async()=>({batch_limit:200,public_downloads:true,ordered_delivery:true}),
   api:async(path,options={},base,key)=>{requests.push({path,options,base,key});return apiHandler?apiHandler(path,options,base,key):snapshot([]);},
   saveAnchor:(url,name)=>saves.push({url,name}),message:text=>messages.push(text),toast:()=>{},persist:()=>{},parseLink:url=>({url,source:'youtube'}),
   download:()=>{},updateDetected:()=>{},renderSaveGuide:()=>{},DEVICE_GUIDES:{},
-  fetch:fetchHandler||(async()=>({ok:true,blob:async()=>new Blob(['clip'],{type:'video/mp4'})}))});
+  fetch:async(url,options)=>{fetches.push({url,options});return fetchHandler?fetchHandler(url,options):{ok:true,blob:async()=>new Blob(['clip'],{type:'video/mp4'})};}});
  vm.runInContext(source,context);
- return {context,$,elements,timers,requests,saves,messages,session,rows:()=>$('#batch-list').children,
+ return {context,$,elements,timers,requests,saves,fetches,shares,messages,session,rows:()=>$('#batch-list').children,
   start:async(urls=['https://youtu.be/TST00000001'])=>{$('#video-url').value=urls.join('\n');await context.download();},
-  tick:async ms=>{const pending=timers.filter(t=>t.ms===ms&&!t.cancelled&&!t.ran);for(const t of pending){t.ran=true;t.fn();}for(let n=0;n<15;n++)await Promise.resolve();},
-  settle:async()=>{for(let n=0;n<20;n++)await Promise.resolve();}};
+  tick:async ms=>{const pending=timers.filter(t=>t.ms===ms&&!t.cancelled&&!t.ran);for(const t of pending){t.ran=true;t.fn();}for(let n=0;n<100;n++)await Promise.resolve();},
+  settle:async()=>{for(let n=0;n<100;n++)await Promise.resolve();}};
 }
 function job(index,status='ready'){return {id:'job-'+index,index,status,stage:status==='ready'?'done':'waiting',progress:status==='ready'?100:0,url:'https://youtu.be/TST'+String(index).padStart(8,'0'),title:'Clip '+index,download_url:'/api/files/job-'+index,preview_url:'/api/preview/job-'+index,filename:`clip-${index}.mp4`,size:4};}
 function snapshot(items,finished=true){return {id:'batch-1',items,finished,archive_url:'/api/archives/batch-1'};}
@@ -40,13 +40,13 @@ test('deselect all also deselects clips that finish later',async()=>{
  await app.start();app.$('#select-all').checked=false;await app.$('#select-all').emit('change');await app.tick(1500);
  assert.equal(app.$('#zip-all').disabled,false);assert(app.$('#zip-all').textContent.includes('(2)'));assert.equal(app.rows()[1].querySelector('input').checked,false);
 });
-test('refresh restores the existing queue and does not resubmit or resend sent files',async()=>{
+test('refresh restores the same queue and refetches tab-local files without downloads',async()=>{
  const session=storage(),items=[job(1),job(2,'queued')];
  const first=launch({session,apiHandler:()=>snapshot(items,false)});await first.start();await first.settle();
- assert.equal(first.saves.length,1);
+ assert.equal(first.fetches.length,1);assert.equal(first.saves.length,0);
  const reopened=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});await reopened.settle();await reopened.tick(1500);await reopened.settle();
  assert.equal(reopened.rows().length,2);assert.equal(reopened.requests.filter(r=>post(r.options)).length,0);
- assert.equal(reopened.saves.length,1);assert(reopened.saves[0].name.includes('2'));
+ assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,2);
  assert(!JSON.stringify(session.entries()).includes('owner-key'));
 });
 test('expired queue can restart rather than repeatedly checking a missing queue',async()=>{
@@ -54,13 +54,6 @@ test('expired queue can restart rather than repeatedly checking a missing queue'
  await app.start();missing=true;await app.tick(1500);assert.equal(app.$('#resume-batch').hidden,false);
  missing=false;await app.$('#resume-batch').emit('click');await app.settle();
  assert.equal(app.requests.filter(r=>post(r.options)&&r.path==='/api/public/batches').length,2);
-});
-test('clearing during share preparation cannot write an old error or share result',async()=>{
- let rejectFetch;const pending=new Promise((_,reject)=>rejectFetch=reject);
- const app=launch({apiHandler:()=>snapshot([job(1)]),fetchHandler:()=>pending});await app.start();
- const sharing=app.$('#prepare-share').emit('click');await app.settle();await app.$('#clear-links').emit('click');
- rejectFetch(Error('old share request failed'));await sharing;
- assert.equal(app.messages.length,0);assert.equal(app.$('#share-files').hidden,true);
 });
 test('lost create responses keep the same idempotency key when resuming',async()=>{
  let failures=2;const app=launch({apiHandler:(path,options)=>{if(post(options)&&failures-->0)throw TypeError('network lost');return snapshot([job(1)]);}});
@@ -70,17 +63,9 @@ test('lost create responses keep the same idempotency key when resuming',async()
 });
 test('refreshing a finished queue does not resend any already-requested files',async()=>{
  const session=storage(),first=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});
- await first.start();await first.tick(1100);await first.tick(1100);assert.equal(first.saves.length,2);
+ await first.start();await first.tick(1100);await first.tick(1100);assert.equal(first.fetches.length,2);assert.equal(first.saves.length,0);
  const reopened=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});await reopened.settle();await reopened.tick(1100);
- assert.equal(reopened.saves.length,0);assert.equal(reopened.context.busy,false);
-});
-test('share preparation stays locked across polling and repeated clicks',async()=>{
- let resolveFetch,calls=0;const pending=new Promise(resolve=>resolveFetch=resolve);
- const app=launch({apiHandler:()=>snapshot([job(1),job(2,'queued')],false),fetchHandler:()=>{calls++;return pending;}});
- await app.start();const sharing=app.$('#prepare-share').emit('click');await app.settle();await app.tick(1500);
- assert.equal(app.$('#prepare-share').disabled,true);await app.$('#prepare-share').emit('click');assert.equal(calls,1);
- resolveFetch({ok:true,blob:async()=>new Blob(['clip'],{type:'video/mp4'})});await sharing;
- assert.equal(app.$('#share-files').hidden,false);
+ assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,2);assert.equal(reopened.context.busy,false);
 });
 test('clearing an in-flight retry cancels the old queue after the reply arrives',async()=>{
  let resolveRetry;const pending=new Promise(resolve=>resolveRetry=resolve);
@@ -106,7 +91,7 @@ test('14 links dispatch and acknowledge in order; a lost receipt does not resend
  app=launch({apiHandler:(path,options)=>{
    if(path.endsWith('/sent')){
      const receipt=JSON.parse(options.body),number=Number(receipt.id.split('-')[1]);
-     assert.equal(number,next+1);assert(app.saves.at(-1).name.includes(String(number)));
+     assert.equal(number,next+1);assert(app.fetches.at(-1).url.endsWith('job-'+number));
      if(!ackFailed){ackFailed=true;throw TypeError('receipt response lost');}
      acknowledgements.push(number);Object.assign(items[next],{stage:'done',delivery_status:'sent',progress:100});next++;
      return {ok:true};
@@ -114,16 +99,16 @@ test('14 links dispatch and acknowledge in order; a lost receipt does not resend
    return state();
  }});
  await app.start(items.map(j=>j.url));
- assert.equal(app.rows()[0].dataset.active,'true');assert.equal(app.saves.length,1);
+ assert.equal(app.rows()[0].dataset.active,'true');assert.equal(app.fetches.length,1);assert.equal(app.saves.length,0);
  for(let n=0;n<35;n++){await app.tick(1100);await app.tick(1500);await app.settle();}
  assert.deepEqual(acknowledgements,[1,2,3,5,6,7,8,9,10,11,12,13,14]);
- assert.equal(app.saves.length,13);assert.equal(new Set(app.saves.map(f=>f.name)).size,13);
+ assert.equal(app.fetches.length,13);assert.equal(app.saves.length,0);
  assert(app.$('#batch-summary').textContent.includes('สำเร็จ 13'));
  assert(app.$('#batch-summary').textContent.includes('ไม่สำเร็จ 1'));
  assert(app.$('#batch-summary').textContent.includes('04'));
  app.$('#select-all').checked=false;await app.$('#select-all').emit('change');
  assert(app.$('#zip-all').textContent.includes('(13)'));await app.$('#zip-all').emit('click');
- assert(!app.saves.at(-1).url.includes('items='));assert(app.saves.at(-1).name.endsWith('.zip'));
+ assert(!app.$('#zip-all').href.includes('items='));assert(app.$('#zip-all').download.endsWith('.zip'));assert.equal(app.saves.length,0);
 });
 test('streaming dispatches only the active clip, sends no receipt POST, and skips the old delay',async()=>{
  let phase=0;
@@ -132,10 +117,77 @@ test('streaming dispatches only the active clip, sends no receipt POST, and skip
  const app=launch({apiHandler:()=>phase===0?snapshot([one,two],false):snapshot([{...one,file_ready:true,can_download:false,delivery_status:'sent',stage:'done'}, {...two,file_ready:true,prefetched:false,can_download:true,delivery_status:'waiting',stage:'sending'}],true)});
  app.context.checkBackend=async()=>({batch_limit:200,public_downloads:true,ordered_delivery:true,streaming:true});
  await app.start([one.url,two.url]);await app.settle();
- assert.equal(app.saves.length,1);assert.equal(app.rows()[1].dataset.active,'false');
+ assert.equal(app.fetches.length,1);assert.equal(app.saves.length,0);assert.equal(app.rows()[1].dataset.active,'false');
  assert.equal(JSON.parse(app.requests[0].options.body).streaming,true);
  assert.equal(app.requests.filter(r=>r.path.endsWith('/sent')).length,0);
  assert.equal(app.timers.filter(t=>t.ms===1100).length,0);
  assert(app.rows()[0].querySelector('.clip-timing').textContent.includes('0.20s'));
- phase=1;await app.tick(1500);await app.settle();assert.equal(app.saves.length,2);
+ phase=1;await app.tick(1500);await app.settle();assert.equal(app.fetches.length,2);assert.equal(app.saves.length,0);
+});
+
+test('15 clips become cached Files in order, no automatic downloads; Save all shares once on the tap',async()=>{
+ const items=Array.from({length:15},(_,i)=>job(i+1));let active=0,max=0;
+ const app=launch({apiHandler:()=>snapshot(items),fetchHandler:async()=>{
+  active++;max=Math.max(max,active);await Promise.resolve();active--;
+  return {ok:true,blob:async()=>new Blob(['clip'],{type:'video/mp4'})};
+ }});
+ await app.start(items.map(j=>j.url));await app.settle();await app.settle();
+ assert.equal(app.fetches.length,15);assert.equal(max,1);assert.equal(app.saves.length,0);assert.equal(app.shares.length,0);
+ assert.deepEqual(app.fetches.map(f=>Number(f.url.split('-').at(-1))),Array.from({length:15},(_,i)=>i+1));
+ assert(app.rows().every(row=>row.querySelector('.clip-status').textContent==='พร้อม · Ready'));
+ assert(app.$('#save-location').textContent.includes('ยังไม่ได้บันทึก'));
+ const fetchCount=app.fetches.length;
+ // Invoke the click synchronously and inspect before a single promise tick.
+ app.$('#save-selected').onclick();assert.equal(app.shares.length,1);
+ assert.equal(app.fetches.length,fetchCount);assert.equal(app.shares[0].files.length,15);
+ assert(app.shares[0].files.every(file=>file instanceof File&&file.type==='video/mp4'&&file.size===4));
+ assert.deepEqual(Array.from(app.shares[0].files,f=>f.name),items.map(j=>j.filename));
+ await app.settle();
+ app.rows()[4].querySelector('[data-action="save"]').onclick();assert.equal(app.shares.length,2);
+ assert.equal(app.shares[1].files.length,1);assert.equal(app.shares[1].files[0].name,'clip-5.mp4');
+ assert.equal(app.saves.length,0);
+});
+test('Save selected shares cached selection; cancelling or unsupported sharing never downloads files',async()=>{
+ const app=launch({apiHandler:()=>snapshot([job(1),job(2),job(3)])});await app.start();await app.settle();
+ const box=app.rows()[1].querySelector('input');box.checked=false;await box.emit('change');
+ app.context.navigator.share=data=>{app.shares.push(data);return Promise.reject(Object.assign(Error('cancel'),{name:'AbortError'}));};
+ app.$('#save-selected').onclick();assert.equal(app.shares.length,1);assert.equal(app.shares[0].files.length,2);await app.settle();
+ assert.equal(app.messages.length,0);assert.equal(app.$('#save-selected').disabled,false);
+ app.context.navigator.canShare=()=>false;app.$('#save-selected').onclick();
+ assert.equal(app.shares.length,1);assert.equal(app.saves.length,0);assert(app.messages.at(-1).includes('ZIP'));
+});
+test('clearing aborts the active fetch and discards late files; no downloads or shares occur',async()=>{
+ let resolveFetch;const pending=new Promise(resolve=>resolveFetch=resolve);
+ const app=launch({apiHandler:()=>snapshot([job(1)]),fetchHandler:()=>pending});await app.start();
+ const signal=app.fetches[0].options.signal;await app.$('#clear-links').emit('click');assert.equal(signal.aborted,true);
+ resolveFetch({ok:true,blob:async()=>new Blob(['clip'])});await app.settle();
+ assert.equal(app.$('#batch-results').hidden,true);assert.equal(app.$('#save-selected').disabled,true);
+ assert.equal(app.saves.length,0);assert.equal(app.shares.length,0);assert.equal(app.messages.length,0);
+});
+test('failed page fetch can be retried without a download; preview uses its local Blob',async()=>{
+ let failed=true;const app=launch({apiHandler:()=>snapshot([job(1)]),fetchHandler:async()=>({ok:!failed,blob:async()=>new Blob(['clip'])})});
+ await app.start();await app.settle();assert.equal(app.rows()[0].dataset.status,'error');
+ failed=false;await app.rows()[0].querySelector('[data-action="save"]').emit('click');await app.settle();
+ assert.equal(app.rows()[0].querySelector('.clip-status').textContent,'พร้อม · Ready');
+ await app.rows()[0].querySelector('[data-action="preview"]').emit('click');
+ assert(app.$('#preview-video').src.startsWith('blob:'));assert.equal(app.saves.length,0);
+});
+
+test('a stalled fetch is aborted and the next clip loads; no automatic save fallback',async()=>{
+ const app=launch({apiHandler:()=>snapshot([job(1),job(2)]),fetchHandler:(url,{signal})=>url.endsWith('job-1')?new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Object.assign(Error('timeout'),{name:'AbortError'})))):Promise.resolve({ok:true,blob:async()=>new Blob(['clip'])})});
+ await app.start();await app.tick(75000);await app.settle();
+ assert.equal(app.rows()[0].dataset.status,'error');assert.equal(app.rows()[1].querySelector('.clip-status').textContent,'พร้อม · Ready');
+ assert.equal(app.fetches.length,2);assert.equal(app.saves.length,0);assert.equal(app.shares.length,0);
+});
+test('streamed response is fully read into a File before it becomes Ready or shareable',async()=>{
+ let release;const gate=new Promise(resolve=>release=resolve);let read=0;
+ const app=launch({apiHandler:()=>snapshot([job(1)]),fetchHandler:async()=>({ok:true,headers:new Headers({'Content-Length':'4'}),body:{getReader:()=>({read:async()=>{
+  if(read++===0)return {done:false,value:new Uint8Array([1,2])};
+  if(read===2){await gate;return {done:false,value:new Uint8Array([3,4])};}
+  return {done:true};
+ }})}})});
+ await app.start();await app.settle();assert.equal(app.$('#save-selected').disabled,true);assert.equal(app.rows()[0].querySelector('progress').value,50);
+ release();await app.settle();app.$('#save-selected').onclick();
+ assert.equal(app.shares.length,1);assert.deepEqual(Array.from(new Uint8Array(await app.shares[0].files[0].arrayBuffer())),[1,2,3,4]);
+ assert.equal(app.saves.length,0);
 });

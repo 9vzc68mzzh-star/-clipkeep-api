@@ -30,3 +30,5 @@ dialog{width:min(490px,calc(100% - 30px));max-height:calc(100% - 38px);overflow:
 .clip-row[data-active=true]{background:#d7b67b0a;border-left:3px solid var(--gold);padding-left:10px}.clip-row[data-active=true] .clip-status{color:var(--gold-light)}
 
 .clip-timing{font-size:10px;line-height:1.8;color:#a6b39a;margin:5px 0;overflow-wrap:anywhere}.clip-row[data-active=false] .clip-status{opacity:.85}
+
+.batch-save-actions>a{display:inline-flex;align-items:center;justify-content:center;flex:1;min-width:170px;padding:11px;font-size:12px}.batch-save-actions>a[aria-disabled="true"]{opacity:.45;cursor:default}.batch-save-actions>a:focus-visible{outline:2px solid var(--gold);outline-offset:3px}@media(max-width:480px){.batch-save-actions>a{min-width:100%}}

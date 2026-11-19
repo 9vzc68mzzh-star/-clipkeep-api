@@ -2,19 +2,19 @@
 (() => {
   'use strict';
   const input = $('#video-url'), form = $('#download-form'), panel = $('#batch-results');
-  const MAX_LINKS = 200, SHARE_LIMIT = 100 * 1024 * 1024;
+  const MAX_LINKS = 200;
   const STATE_KEY = 'klipnivo-batch-v1';
   let run = null, generation = 0, timer, lastInput = '', rows = new Map();
-  let sendQueue = [], sending = false, shareFiles = [], shareSignature = '';
-  let shareAbort = null, shareVersion = 0, sharePending = false, savingSelection = false;
+  let sendQueue = [], sending = false, receiveAbort = null, sharePending = false;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const lines = () => input.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   const canSave = job => !!job.file_ready || job.status === 'ready' && !job.stream_ready;
   const canDispatch = job => job.stream_ready ? job.can_download : job.status === 'ready';
   const isDone = job => job.status === 'ready' && (!job.delivery_status || job.delivery_status === 'sent');
   const receipt = job => `${job.id}:${job.attempt || 1}`;
-  const selected = () => run ? run.items.filter(j => canSave(j) && !run.unselected.has(j.id)) : [];
-  const freshRun = () => ({base:apiBase,key:apiKey,format,items:[],sent:new Set(),dispatched:new Set(),queued:new Set(),unselected:new Set(),seenReady:new Set(),selectNew:true,finished:false});
+  const loaded = job => run?.files.get(receipt(job));
+  const selected = () => run ? run.items.filter(j => loaded(j) && !run.unselected.has(j.id)) : [];
+  const freshRun = () => ({base:apiBase,key:apiKey,format,items:[],sent:new Set(),dispatched:new Set(),queued:new Set(),unselected:new Set(),seenReady:new Set(),selectNew:true,finished:false,files:new Map(),objectURLs:new Map(),fetchErrors:new Map(),loading:null});
   function forgetState() { try { sessionStorage.removeItem(STATE_KEY); } catch {} }
   function saveState() {
     if (!run?.selection || !run.path || !run.id && !run.pendingCreate) return;
@@ -36,37 +36,67 @@
     $('#demo-btn').disabled = active;
     document.querySelectorAll('.format,.tab').forEach(b => b.disabled = active);
   }
-  function invalidateShare() {
-    ++shareVersion; shareAbort?.abort(); shareAbort=null; sharePending=false;
-    shareFiles = []; shareSignature = '';
-    $('#share-files').hidden = true;
-    $('#prepare-share').textContent='เตรียมบันทึกผ่านเมนูแชร์';
+  function releaseFiles() {
+    receiveAbort?.abort(); receiveAbort=null;
+    if (!run) return;
+    for (const url of run.objectURLs.values()) URL.revokeObjectURL(url);
+    run.objectURLs.clear(); run.files.clear();
+    if ($('#clip-preview').open) $('#clip-preview').close();
   }
   function saveNotice() {
-    if (!run) return;
-    const count = run.sent.size;
+    if (!run || sharePending) return;
+    const count=run.items.filter(loaded).length;
     $('#save-location').textContent = count
-      ? `ส่งดาวน์โหลดแล้ว ${count} คลิป → ไฟล์ (Files) > ดาวน์โหลด (Downloads) ตามการตั้งค่าเบราว์เซอร์ ตรวจสอบรายการดาวน์โหลดเพื่อยืนยันว่าบันทึกครบ`
-      : 'ไฟล์จะส่งไปยัง Files > Downloads ตามการตั้งค่าเบราว์เซอร์ อาจมีหน้าต่างขออนุญาตดาวน์โหลด';
+      ? `พร้อมบันทึก ${count} คลิป · แตะ “บันทึกทั้งหมด” หรือ “บันทึก” แล้วเลือก “บันทึกวิดีโอ” (รูปภาพ) หรือ “บันทึกไปยังไฟล์” ในเมนูแชร์ ตามที่อุปกรณ์รองรับ · ยังไม่ได้บันทึกลงเครื่อง`
+      : 'กำลังเตรียมไฟล์ในหน้านี้ จะไม่เปิดดาวน์โหลดอัตโนมัติ · เมื่อพร้อม แตะบันทึกเพื่อเลือกแอปรูปภาพหรือ Files';
+    if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function')
+      $('#save-location').textContent += ' · เบราว์เซอร์นี้ไม่รองรับแชร์ไฟล์ ใช้ปุ่ม ZIP หลังคิวจบ';
   }
-  async function downloadFile(job, automatic = false) {
+  async function receiveFile(job) {
     if (!run || !(canSave(job) || canDispatch(job))) return;
     const current=run,token=generation,key=receipt(job);
-    if (!automatic || !run.dispatched.has(key) && !(isDone(job) && run.sent.has(job.id))) {
-      saveAnchor(fileURL(job.download_url), job.filename);
-      run.sent.add(job.id);run.dispatched.add(key);saveState();
+    if (!loaded(job)) {
+      const controller=new AbortController();receiveAbort=controller;
+      let timeout;
+      const touch=()=>{clearTimeout(timeout);timeout=setTimeout(()=>controller.abort(),75000);};
+      current.loading={id:job.id,bytes:0,total:job.size||job.bytes_total||0};current.fetchErrors.delete(key);row(job);touch();
+      try {
+        // Fetch never navigates to an attachment and cannot open Safari's download prompt.
+        const response=await fetch(fileURL(job.download_url),{signal:controller.signal,cache:'no-store'});
+        if (!response.ok) throw Error('รับไฟล์ไม่สำเร็จ กรุณาลองโหลดอีกครั้ง');
+        let blob;
+        if (response.body?.getReader) {
+          const reader=response.body.getReader(),chunks=[];
+          current.loading.total=Number(response.headers.get('Content-Length'))||current.loading.total;
+          while (true) {
+            const {done,value}=await reader.read();
+            if (token!==generation) { await reader.cancel();return; }
+            touch();if(done)break;
+            chunks.push(value);current.loading.bytes+=value.byteLength;row(job);
+          }
+          if (current.loading.total && current.loading.bytes!==current.loading.total) throw Error('รับไฟล์ไม่ครบ กรุณาลองโหลดอีกครั้ง');
+          blob=new Blob(chunks);
+        } else blob=await response.blob();
+        if(token!==generation)return;
+        if(!blob.size)throw Error('ไฟล์ว่าง กรุณาลองโหลดอีกครั้ง');
+        const type=job.filename.endsWith('.mp3')?'audio/mpeg':'video/mp4';
+        current.files.set(key,new File([blob],job.filename,{type}));
+        current.sent.add(job.id);current.dispatched.add(key);saveState();
+      } catch(error) {
+        if(token===generation)current.fetchErrors.set(key,error.name==='AbortError'?'รับไฟล์ไม่มีความคืบหน้า กรุณาลองโหลดอีกครั้ง':error.message);
+        return;
+      } finally {
+        clearTimeout(timeout);
+        if(receiveAbort===controller)receiveAbort=null;
+        if(token===generation){current.loading=null;row(job);updateActions();saveNotice();}
+      }
     }
-    const label = rows.get(job.id)?.querySelector('.clip-save-status');
-    if (label) label.textContent = 'ส่งดาวน์โหลดแล้ว · ตรวจสอบใน Files / Downloads';
-    saveNotice();
-    if (!automatic) toast('ส่งคำขอดาวน์โหลดแล้ว');
+    if (token!==generation)return;
+    // Legacy servers need a receipt only after the complete Blob arrived.
     if (!job.stream_ready && job.delivery_status === 'waiting') {
       try {
         await api(`${current.path}/${current.id}/sent`,{method:'POST',body:JSON.stringify({id:job.id,attempt:job.attempt})},current.base,current.key);
-      } catch {
-        // Repeat the receipt on the next poll, without resending the same file.
-        if (token===generation) run.queued.delete(key);
-      }
+      } catch { if(token===generation)current.queued.delete(key); }
     }
   }
   async function drainDownloads() {
@@ -75,12 +105,31 @@
     try {
       while (sendQueue.length) {
         const entry = sendQueue.shift();
-        if (run && entry.generation === generation && (!run.dispatched.has(receipt(entry.job)) || entry.job.delivery_status === 'waiting')) {
-          await downloadFile(entry.job, true);
-          if (!entry.job.stream_ready) await pause(1100);
-        }
+        if (run && entry.generation === generation) await receiveFile(entry.job);
       }
-    } finally { sending = false; if (run?.finished) controls(false); }
+    } finally {
+      sending = false;
+      if(run){controls(!run.finished);updateActions();saveNotice();}
+    }
+  }
+  function shareJobs(jobs) {
+    if(sharePending||!jobs.length)return;
+    const files=jobs.map(loaded);
+    if(files.some(file=>!file))return;
+    const token=generation;
+    try {
+      if(typeof navigator.share!=='function'||typeof navigator.canShare!=='function'||!navigator.canShare({files})) {
+        message('อุปกรณ์นี้แชร์ไฟล์ชุดนี้ไม่ได้ กรุณาเลือกคลิปน้อยลง หรือใช้ ZIP หลังคิวจบ');return;
+      }
+      // No await/fetch before this call: retain the user's iOS tap activation.
+      const sharing=navigator.share({files});
+      sharePending=true;updateActions();
+      Promise.resolve(sharing).then(()=>{
+        if(token===generation)$('#save-location').textContent=`ส่ง ${files.length} คลิปให้เมนูแชร์แล้ว · หากเลือก “บันทึกวิดีโอ” ให้ดูในรูปภาพ หรือ “บันทึกไปยังไฟล์” ให้ดูโฟลเดอร์ที่คุณเลือก`;
+      },error=>{
+        if(token===generation&&error.name!=='AbortError')message('เปิดเมนูแชร์ไม่ได้ กรุณาเลือกน้อยลงหรือใช้ ZIP');
+      }).finally(()=>{sharePending=false;if(run)updateActions();});
+    } catch(error) {if(token===generation&&error.name!=='AbortError')message('เปิดเมนูแชร์ไม่ได้ กรุณาใช้ ZIP');}
   }
   function row(job) {
     let el = rows.get(job.id);
@@ -90,28 +139,35 @@
       rows.set(job.id, el); $('#batch-list').append(el);
       el.querySelector('input').addEventListener('change', e => {
         e.target.checked ? run.unselected.delete(job.id) : run.unselected.add(job.id);
-        invalidateShare(); saveState(); updateActions();
+        saveState(); updateActions();
       });
-      el.querySelector('[data-action="save"]').onclick = () => downloadFile(run.items.find(j => j.id === job.id));
+      el.querySelector('[data-action="save"]').onclick = () => {
+        const item=run.items.find(j=>j.id===job.id);
+        if(loaded(item))shareJobs([item]);
+        else if(run.fetchErrors.has(receipt(item))){run.fetchErrors.delete(receipt(item));sendQueue.push({generation,job:item});drainDownloads();}
+      };
       el.querySelector('[data-action="preview"]').onclick = () => preview(run.items.find(j => j.id === job.id));
     }
-    const signature = JSON.stringify([job.status,job.stage,job.progress,job.title,job.thumbnail,job.warning,job.error,job.attempt,job.delivery_status,job.can_download,job.prefetched,job.timings,job.bytes_sent]);
+    const signature = JSON.stringify([job.status,job.stage,job.progress,job.title,job.thumbnail,job.warning,job.error,job.attempt,job.delivery_status,job.can_download,job.prefetched,job.timings,job.bytes_sent,!!loaded(job),run.loading,run.fetchErrors.get(receipt(job)),sharePending]);
     if (el.dataset.signature === signature) return;
     el.dataset.signature = signature;
-    el.dataset.status = job.status;
-    el.dataset.active = !job.prefetched && (job.status === 'processing' || job.stream_ready && job.delivery_status === 'streaming' || canDispatch(job) && !isDone(job)) ? 'true' : 'false';
+    el.dataset.status = run.fetchErrors.has(receipt(job))?'error':loaded(job)?'ready':job.status;
+    el.dataset.active = run.loading?.id===job.id || !loaded(job) && !run.fetchErrors.has(receipt(job)) && !job.prefetched && (job.status === 'processing' || job.stream_ready && job.delivery_status === 'streaming' || canDispatch(job) && !isDone(job)) ? 'true' : 'false';
     el.querySelector('input').checked = canSave(job) ? !run.unselected.has(job.id) : run.selectNew;
     el.querySelector('h3').textContent = `${String(job.index).padStart(2,'0')} · ${job.title || job.url || 'กำลังอ่านข้อมูลคลิป'}`;
-    const stages = {waiting:'รอคิว',resolving:'กำลังดาวน์โหลด · อ่านข้อมูล',downloading:'กำลังดาวน์โหลด',merging:'กำลังดาวน์โหลด · รวมภาพและเสียง',prefetching:'เตรียมข้อมูลคลิปถัดไป',next_ready:'รอส่งตามลำดับ · ข้อมูลพร้อมแล้ว',converting:'รวมสตรีม · ไม่แปลงภาพใหม่',sending:'กำลังสตรีมลงเครื่อง',retrying:'ลองใหม่อัตโนมัติ',done:'เสร็จแล้ว',failed:'ไม่สำเร็จ',cancelled:'ยกเลิกแล้ว'};
-    el.querySelector('.clip-status').textContent = job.error || `${stages[job.stage] || 'รอคิว'}${el.dataset.active === 'true' ? job.stream_ready && !job.bytes_total && job.bytes_sent ? ` · ${Math.ceil(job.bytes_sent/1024)} KB` : ` · ${Math.round(job.progress || 0)}%` : ''}${job.auto_retry ? ' · ลองใหม่ 1/1' : ''}${job.warning ? ' · ' + job.warning : ''}`;
-    const progress = el.querySelector('progress'); progress.value = job.progress || 0;
+    const stages = {waiting:'รอคิว',resolving:'กำลังดาวน์โหลด · อ่านข้อมูล',downloading:'กำลังดาวน์โหลด',merging:'กำลังดาวน์โหลด · รวมภาพและเสียง',prefetching:'เตรียมข้อมูลคลิปถัดไป',next_ready:'รอส่งตามลำดับ · ข้อมูลพร้อมแล้ว',converting:'รวมสตรีม · ไม่แปลงภาพใหม่',sending:'กำลังรับไฟล์เข้าหน้าเว็บ',retrying:'ลองใหม่อัตโนมัติ',done:'เสร็จแล้ว',failed:'ไม่สำเร็จ',cancelled:'ยกเลิกแล้ว'};
+    el.querySelector('.clip-status').textContent = loaded(job)?'พร้อม · Ready':run.fetchErrors.get(receipt(job)) || job.error || `${stages[job.stage] || 'รอคิว'}${el.dataset.active === 'true' ? job.stream_ready && !job.bytes_total && job.bytes_sent ? ` · ${Math.ceil(job.bytes_sent/1024)} KB` : ` · ${Math.round(job.progress || 0)}%` : ''}${job.auto_retry ? ' · ลองใหม่ 1/1' : ''}${job.warning ? ' · ' + job.warning : ''}`;
+    if(run.loading?.id===job.id)el.querySelector('.clip-status').textContent=run.loading.total?`กำลังรับไฟล์เข้าหน้าเว็บ · ${Math.min(99,Math.round(run.loading.bytes/run.loading.total*100))}%`:`กำลังรับไฟล์เข้าหน้าเว็บ · ${Math.ceil(run.loading.bytes/1024)} KB`;
+    const progress = el.querySelector('progress'); progress.value = run.loading?.id===job.id && run.loading.total ? Math.min(99,run.loading.bytes/run.loading.total*100) : job.progress || 0;
     progress.hidden = el.dataset.active !== 'true' && job.status !== 'queued';
-    el.querySelector('input').disabled = !canSave(job);
-    el.querySelector('.clip-actions').hidden = !canSave(job);
-    el.querySelector('[data-action="save"]').disabled = job.engine==='stream' && !run.finished;
+    el.querySelector('input').disabled = !loaded(job);
+    el.querySelector('.clip-actions').hidden = !loaded(job) && !run.fetchErrors.has(receipt(job));
+    el.querySelector('[data-action="preview"]').disabled = !loaded(job);
+    el.querySelector('[data-action="save"]').disabled = sharePending;
+    el.querySelector('[data-action="save"]').textContent = loaded(job)?'บันทึก · Save':'โหลดอีกครั้ง';
     const labels={startup_s:'เริ่มงาน',resolve_s:'ลิงก์',extract_s:'ข้อมูล',probe_s:'ตรวจรูปแบบ',wait_turn_s:'รอส่ง',download_s:'รับข้อมูล',merge_s:'รวม/เสียง',send_s:'ส่ง',total_s:'รวมเวลา'};
     el.querySelector('.clip-timing').textContent=Object.entries(labels).filter(([key])=>job.timings?.[key]!=null).map(([key,label])=>`${label} ${Number(job.timings[key]).toFixed(2)}s`).join(' · ');
-    if (run.sent.has(job.id)) el.querySelector('.clip-save-status').textContent='ส่งดาวน์โหลดแล้ว · ตรวจสอบใน Files / Downloads';
+    el.querySelector('.clip-save-status').textContent=loaded(job)?'ไฟล์พร้อมในหน้านี้ · แตะบันทึกเพื่อเปิดเมนูแชร์':'';
     if (job.thumbnail && !el.querySelector('img')) {
       try {
         const url = new URL(job.thumbnail);
@@ -124,18 +180,31 @@
   }
   function updateActions() {
     if (!run) return;
-    const ready = run.items.filter(canSave), chosen = selected();
+    const ready = run.items.filter(loaded), chosen = selected();
     const all = $('#select-all'); all.checked = ready.length > 0 && chosen.length === ready.length;
     all.indeterminate = chosen.length > 0 && chosen.length !== ready.length;
     all.disabled = !ready.length;
-    $('#zip-all').disabled = !ready.length || run.streaming && !run.finished;
-    $('#zip-all').textContent = `ดาวน์โหลดทั้งหมดเป็น ZIP (${ready.length})`;
-    $('#save-selected').disabled = !chosen.length || savingSelection || run.streaming && !run.finished;
+    const successful=run.items.filter(canSave),zip=$('#zip-all');
+    zip.disabled = run.expired || !successful.length || !run.finished;
+    zip.setAttribute('aria-disabled',String(zip.disabled));
+    if(zip.disabled)zip.removeAttribute('href');else zip.href=fileURL(run.archive_url);
+    zip.download=`KlipNivo-${(run.id||'batch').slice(0,8)}.zip`;
+    zip.textContent = `ดาวน์โหลดทั้งหมดเป็น ZIP (${successful.length})`;
+    $('#save-selected').disabled = !chosen.length || sharePending;
+    $('#save-selected').textContent = `${chosen.length===ready.length?'บันทึกทั้งหมด · Save all':'บันทึกที่เลือก · Save selected'} (${chosen.length})`;
     $('#retry-failed').hidden = run.expired || !run.finished || !run.items.some(j => j.status === 'error' && j.error_code !== 'invalid_link');
-    const canShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
-    $('#prepare-share').hidden = !canShare || !chosen.length || shareFiles.length > 0;
-    $('#prepare-share').disabled = sharePending || run.streaming && !run.finished || chosen.reduce((n,j) => n+(j.size||0),0) > SHARE_LIMIT;
-    $('#prepare-share').title = 'เมนูแชร์รองรับรวมไม่เกิน 100 MB ต่อครั้ง เลือกน้อยลงหรือใช้ ZIP สำหรับชุดใหญ่';
+    for(const job of run.items){const button=rows.get(job.id)?.querySelector('[data-action="save"]');if(button)button.disabled=sharePending;}
+    if(run.items.length){
+      const failed=run.items.filter(j=>j.status==='error'||run.fetchErrors.has(receipt(j))),cancelled=run.items.filter(j=>j.status==='cancelled');
+      const done=ready.length+failed.length+cancelled.length;
+      $('#batch-count').textContent=`${done} / ${run.items.length} คลิป`;
+      $('#batch-progress').value=run.items.reduce((sum,j)=>sum+(loaded(j)||['error','cancelled'].includes(j.status)||run.fetchErrors.has(receipt(j))?100:Math.min(99,j.progress||0)),0)/run.items.length;
+      if(run.finished&&!run.expired){
+        const pending=run.items.length-done;
+        $('#batch-summary').textContent=pending?`กำลังรับไฟล์เข้าหน้านี้ · พร้อม ${ready.length} คลิป · รอ ${pending} คลิป`:`พร้อมบันทึก · สำเร็จ ${ready.length} คลิป · ไม่สำเร็จ ${failed.length} คลิป${failed.length?` (คลิป ${failed.map(j=>String(j.index).padStart(2,'0')).join(', ')})`:''}${cancelled.length?` · ยกเลิก ${cancelled.length} คลิป`:''}`;
+      }
+    }
+
   }
   function rememberBatch() {
     if (!run || run.remembered) return;
@@ -158,7 +227,7 @@
         run.seenReady.add(job.id);
       }
       row(job);
-      if (canDispatch(job) && !run.queued.has(receipt(job))) {
+      if ((canDispatch(job) || run.finished && canSave(job)) && (!loaded(job) || !job.stream_ready && job.delivery_status==='waiting') && !run.fetchErrors.has(receipt(job)) && !run.queued.has(receipt(job))) {
         run.queued.add(receipt(job)); sendQueue.push({generation,job});
       }
     }
@@ -169,8 +238,8 @@
     $('#batch-title').textContent = run.finished ? 'ผลลัพธ์และบันทึกไฟล์' : 'คิวดาวน์โหลด';
     const ready = run.items.filter(isDone).length, failed = run.items.filter(j => j.status === 'error');
     $('#batch-summary').textContent = run.finished
-      ? `เสร็จแล้ว · สำเร็จ ${ready} คลิป · ไม่สำเร็จ ${failed.length} คลิป${failed.length ? ` (คลิป ${failed.map(j=>String(j.index).padStart(2,'0')).join(', ')})` : ''}`
-      : 'ส่งทีละคลิป ตามลำดับ · เตรียมล่วงหน้าเพียง 1 คลิป · คัดลอกภาพเดิม ไม่แปลงวิดีโอ';
+      ? `เตรียมครบแล้ว · สำเร็จ ${ready} คลิป · ไม่สำเร็จ ${failed.length} คลิป${failed.length ? ` (คลิป ${failed.map(j=>String(j.index).padStart(2,'0')).join(', ')})` : ''}`
+      : 'รับไฟล์ทีละคลิป ตามลำดับ · เตรียมล่วงหน้าเพียง 1 คลิป · พร้อมแล้วแตะบันทึกเพื่อเปิดเมนูแชร์';
     controls(!run.finished || sendQueue.length > 0); updateActions(); saveNotice(); drainDownloads();
     if (run.finished) rememberBatch();
     saveState();
@@ -249,9 +318,9 @@
     if (urls.length > MAX_LINKS) { message(`มี ${urls.length} ลิงก์ รองรับสูงสุด ${MAX_LINKS} ต่อชุด กรุณาแบ่งชุด ไม่มีลิงก์ถูกตัดทิ้ง`); return; }
     lastInput = input.value;
     const token = ++generation;
-    run = freshRun(); forgetState();
+    releaseFiles();run = freshRun(); forgetState();
     const current = run;
-    rows.clear(); $('#batch-list').replaceChildren(); sendQueue=[]; invalidateShare();
+    rows.clear(); $('#batch-list').replaceChildren(); sendQueue=[];
     $('#result').hidden = true; panel.hidden = false; controls(true);
     $('#batch-title').textContent='กำลังเริ่มชุดดาวน์โหลด'; $('#batch-count').textContent=`${urls.length} คลิป`;
     $('#batch-progress').value=0; $('#batch-summary').textContent='กำลังปลุกเซิร์ฟเวอร์ อาจใช้เวลาประมาณหนึ่งนาที…';
@@ -283,7 +352,9 @@
     const audio = job.filename.endsWith('.mp3');
     const player = $(audio?'#preview-audio':'#preview-video'), other = $(audio?'#preview-video':'#preview-audio');
     other.pause(); other.removeAttribute('src'); other.load(); other.hidden=true;
-    player.hidden=false; player.src=fileURL(job.preview_url); player.load();
+    if(!loaded(job))return;
+    const key=receipt(job);if(!run.objectURLs.has(key))run.objectURLs.set(key,URL.createObjectURL(loaded(job)));
+    player.hidden=false; player.src=run.objectURLs.get(key); player.load();
     $('#preview-title').textContent=job.title; $('#clip-preview').showModal();
   }
   $('#clip-preview').addEventListener('close',()=>{
@@ -291,24 +362,17 @@
   });
   $('#select-all').onchange=e=>{
     run.selectNew=e.target.checked;
-    for (const j of run.items.filter(canSave)) {
+    for (const j of run.items.filter(loaded)) {
       e.target.checked ? run.unselected.delete(j.id) : run.unselected.add(j.id);
       rows.get(j.id).querySelector('input').checked=e.target.checked;
     }
-    invalidateShare(); saveState(); updateActions();
+    saveState(); updateActions();
   };
-  $('#zip-all').onclick=()=>{
-    const jobs=run.items.filter(canSave); if(!jobs.length)return;
-    const url=new URL(fileURL(run.archive_url));
-    saveAnchor(url.href,`KlipNivo-${run.id.slice(0,8)}.zip`);
-    $('#save-location').textContent=`ส่ง ZIP รวม ${jobs.length} คลิปไปยังรายการดาวน์โหลดแล้ว → Files > Downloads · แตะไฟล์ ZIP ในแอปไฟล์เพื่อแตกไฟล์`;
+  $('#zip-all').onclick=event=>{
+    if(!run?.finished||$('#zip-all').disabled){event.preventDefault();return;}
+    $('#save-location').textContent='เลือกดาวน์โหลด ZIP แล้ว · ตรวจสอบรายการดาวน์โหลดของเบราว์เซอร์ แล้วแตะ ZIP ในแอปไฟล์เพื่อแตกไฟล์';
   };
-  $('#save-selected').onclick=async()=>{
-    if(savingSelection)return;
-    const token=generation, jobs=selected(); savingSelection=true; updateActions();
-    try{for(const job of jobs){if(token!==generation)break;await downloadFile(job);await pause(1100);}}
-    finally{if(token===generation){savingSelection=false;updateActions();}}
-  };
+  $('#save-selected').onclick=()=>shareJobs(selected());
   $('#retry-failed').onclick=async()=>{
     const token=generation,current=run; $('#retry-failed').disabled=true;controls(true);
     try{
@@ -319,46 +383,10 @@
     }catch(e){if(token===generation){controls(false);message(e.message);}}
     finally{if(token===generation)$('#retry-failed').disabled=false;}
   };
-  $('#prepare-share').onclick=async()=>{
-    if(sharePending)return;
-    const chosen=selected(),token=generation;
-    if(!chosen.length||chosen.reduce((sum,j)=>sum+(j.size||0),0)>SHARE_LIMIT)return;
-    const button=$('#prepare-share'),version=shareVersion;
-    const controller=new AbortController();shareAbort=controller;
-    const timeout=setTimeout(()=>controller.abort(),120000),signal=controller.signal;
-    sharePending=true;button.disabled=true;button.textContent='กำลังเตรียมเมนูแชร์…';
-    try{
-      const files=[];let total=0;
-      for(const job of chosen){
-        const response=await fetch(fileURL(job.download_url),{signal});
-        if(token!==generation||version!==shareVersion)return;
-        if(!response.ok)throw Error('โหลดไฟล์สำหรับเมนูแชร์ไม่สำเร็จ');
-        const blob=await response.blob();total+=blob.size;
-        if(total>SHARE_LIMIT)throw Error('ไฟล์เกิน 100 MB กรุณาเลือกน้อยลงหรือใช้ ZIP');
-        files.push(new File([blob],job.filename,{type:blob.type}));
-        if(token!==generation||version!==shareVersion)return;
-      }
-      if(chosen.map(j=>j.id).join(',')!==selected().map(j=>j.id).join(','))throw Error('รายการเลือกเปลี่ยนแล้ว กรุณาเตรียมอีกครั้ง');
-      if(!navigator.canShare({files}))throw Error('เบราว์เซอร์นี้แชร์ไฟล์ชุดนี้ไม่ได้ กรุณาใช้ ZIP');
-      shareFiles=files;shareSignature=chosen.map(j=>j.id).join(',');
-      $('#share-files').hidden=false;button.hidden=true;
-      $('#save-location').textContent=`พร้อมแชร์ ${files.length} คลิป · แตะ “บันทึกทั้งหมด · Save to Files” แล้วเลือก “บันทึกไปยังไฟล์”`;
-    }catch(e){if(token===generation&&version===shareVersion)message(e.name==='AbortError'?'เตรียมเมนูแชร์นานเกินไป กรุณาลองใหม่หรือใช้ ZIP':e.message);}
-    finally{clearTimeout(timeout);if(token===generation&&version===shareVersion){sharePending=false;shareAbort=null;button.textContent='เตรียมบันทึกผ่านเมนูแชร์';updateActions();}}
-  };
-  $('#share-files').onclick=async()=>{
-    if(!shareFiles.length||shareSignature!==selected().map(j=>j.id).join(','))return;
-    const token=generation,version=shareVersion,files=shareFiles.slice();
-    try{
-      // A fresh click retains the transient activation required by iOS Web Share.
-      await navigator.share({files,title:'KlipNivo'});
-      if(token===generation&&version===shareVersion)$('#save-location').textContent=`ส่ง ${files.length} คลิปให้เมนูแชร์แล้ว หากเลือก “บันทึกไปยังไฟล์” ให้ตรวจสอบโฟลเดอร์ที่คุณเลือก`;
-    }catch(e){if(token===generation&&version===shareVersion&&e.name!=='AbortError')message('เปิดเมนูแชร์ไม่ได้ กรุณาใช้ ZIP หรือบันทึกไฟล์');}
-  };
   $('#clear-links').onclick=()=>{
     clearTimeout(timer);
     if(run?.id)request(`${run.path}/${run.id}/cancel`,{method:'POST'}).catch(()=>{});
-    ++generation;run=null;sendQueue=[];savingSelection=false;rows.clear();invalidateShare();forgetState();controls(false);
+    ++generation;releaseFiles();run=null;sendQueue=[];rows.clear();forgetState();controls(false);
     input.value='';lastInput='';$('#detected').textContent='';$('#form-message').hidden=true;
     panel.hidden=true;$('#batch-list').replaceChildren();$('#result').hidden=true;input.focus();
   };
@@ -374,10 +402,15 @@
   updateDetected=schedule;
   download=start;form.addEventListener('submit',start);input.addEventListener('input',schedule);
   $('#paste-btn').onclick=async()=>{try{input.value=await navigator.clipboard.readText();schedule({inputType:'insertFromPaste'});input.focus();}catch{toast('แตะช่องลิงก์แล้วใช้คำสั่งวาง');input.focus();}};
-  for(const device of Object.values(DEVICE_GUIDES)) {
-    device.steps[0]='ไฟล์พร้อมแล้วจะเริ่มดาวน์โหลดอัตโนมัติ อนุญาตเมื่อเบราว์เซอร์ถาม หรือใช้ปุ่ม ZIP เพื่อเก็บหลายไฟล์ในครั้งเดียว';
-    device.steps[2]=device.mobile?'แตะ ZIP เพื่อแตกไฟล์ หรือใช้เมนูแชร์ → “บันทึกไปยังไฟล์” เมื่อรองรับ เลือกโฟลเดอร์ได้ด้วยตัวเอง':'เปิดไฟล์ MP4 จาก Downloads เพื่อดู หรือแตกไฟล์ ZIP เพื่อดูคลิปทั้งหมด';
-  }
+  const originalSaveGuide=renderSaveGuide;
+  renderSaveGuide=(value=format)=>{
+    for(const device of Object.values(DEVICE_GUIDES)) {
+      device.steps[0]='รอให้คลิปขึ้น “พร้อม · Ready” แล้วแตะ “บันทึก” หรือเลือกหลายคลิปแล้วแตะ “บันทึกทั้งหมด” เพื่อเปิดเมนูแชร์ครั้งเดียว';
+      device.steps[1]=value==='mp3'?'เลือก “บันทึกไปยังไฟล์” แล้วเลือกโฟลเดอร์ ไฟล์ MP3 เปิดฟังได้ในแอปไฟล์หรือแอปเล่นเพลง':device.mobile?'เลือก “บันทึกวิดีโอ” เพื่อเก็บในรูปภาพ หรือ “บันทึกไปยังไฟล์” แล้วเลือกโฟลเดอร์ ตามเมนูที่เครื่องรองรับ':'เลือกตำแหน่งบันทึกในเมนูแชร์ หากไม่มีเมนูแชร์ ใช้ปุ่ม ZIP หลังคิวจบ';
+      device.steps[2]='ไฟล์ยังไม่ถูกบันทึกลงเครื่องจนกว่าคุณจะเลือกในเมนูแชร์ · เปิดหน้านี้ไว้จนบันทึกเสร็จ หรือใช้ ZIP สำรอง';
+    }
+    originalSaveGuide(value);
+  };
   renderSaveGuide();
   async function restoreState() {
     let saved;
@@ -394,7 +427,8 @@
     const token=++generation;
     run=Object.assign(freshRun(),{id:saved.id,path:saved.path,selection,format:selection.format,
       pendingCreate:!!saved.pendingCreate,selectNew:saved.selectNew!==false,remembered:!!saved.remembered});
-    for (const field of ['sent','dispatched','unselected','seenReady']) {
+    // Files are tab-local Blobs; refetch on refresh, never navigate/download them.
+    for (const field of ['unselected','seenReady']) {
       if (Array.isArray(saved[field])) run[field]=new Set(saved[field].filter(value=>typeof value==='string').slice(-(field==='dispatched'?MAX_LINKS*4:MAX_LINKS)));
     }
     input.value=selection.urls.join('\n');lastInput=input.value;
