@@ -64,10 +64,14 @@ ERROR_MESSAGES = {
     'invalid_link': 'ลิงก์นี้ไม่ใช่วิดีโอ Facebook หรือ YouTube ที่รองรับ',
     'storage_limit': 'พื้นที่เตรียมไฟล์เต็มชั่วคราว กรุณาบันทึกไฟล์แล้วลองใหม่ภายหลัง',
     'video_unavailable': 'ไม่พบแทร็กภาพในคลิปนี้ ไม่ส่งไฟล์เสียงที่ตั้งชื่อเป็น MP4',
+    'compatible_video_unavailable': 'ไม่มีสตรีม H.264 ที่เข้ากันได้ในคุณภาพนี้ จึงไม่แปลงภาพใหม่ กรุณาลองคุณภาพอื่น',
     'conversion_failed': 'แปลงไฟล์ให้รองรับอุปกรณ์ไม่สำเร็จ กรุณาลองใหม่หรือลดคุณภาพ',
     'download_failed': 'ดาวน์โหลดคลิปนี้ไม่สำเร็จ กรุณาลองคลิปสาธารณะอื่น หากยังไม่ได้ให้ตรวจ Logs ของเซิร์ฟเวอร์',
 }
 logger = logging.getLogger('clipkeep')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
 jobs = {}
 batches = {}
 futures = {}
@@ -81,12 +85,13 @@ app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=['GET', 
 class Download(BaseModel):
     url: str = Field(max_length=2000)
     format: str = 'mp4'
-    quality: str = '1080'
+    quality: str = '720'
 
 class Batch(BaseModel):
+    streaming: bool = False
     urls: list[str] = Field(min_length=1, max_length=MAX_BATCH_LINKS)
     format: str = 'mp4'
-    quality: str = '1080'
+    quality: str = '720'
     request_id: str = Field(default='', max_length=80)
 
 class DownloadFailure(Exception):
@@ -196,6 +201,7 @@ def cleanup():
                     jobs.pop(job_id, None)
                     futures.pop(job_id, None)
                     shutil.rmtree(ROOT / job_id, ignore_errors=True)
+                if batch.get('engine') == 'stream': streamer.discard(batch_id)
                 batches.pop(batch_id)
         for job_id, job in list(jobs.items()):
             if not job.get('batch_id') and settled(job) and now - job.get('finished', job['created']) > TTL:
@@ -237,7 +243,7 @@ if multiprocessing.current_process().name == 'MainProcess':
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 5, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True}
+    return {'service': 'clipkeep', 'version': 6, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
 
 @app.get('/', include_in_schema=False)
 def homepage():
@@ -318,7 +324,7 @@ def enqueue_batch(data, public, client):
             rate_limit(client)
         batch_id = secrets.token_urlsafe(32)
         batch = {'ids': [], 'created': time.time(), 'public': public, 'client': client,
-                 'request_id': data.request_id, 'format': data.format, 'readers': 0}
+                 'request_id': data.request_id, 'format': data.format, 'readers': 0, 'engine': 'stream' if data.streaming else 'buffered'}
         batches[batch_id] = batch
         for index, raw in enumerate(data.urls, 1):
             job_id = secrets.token_urlsafe(32)
@@ -334,16 +340,19 @@ def enqueue_batch(data, public, client):
                            error=ERROR_MESSAGES['invalid_link'], finished=time.time())
             jobs[job_id] = job
             batch['ids'].append(job_id)
-        for job_id in batch['ids']:
-            if not settled(jobs[job_id]):
-                submit(job_id)
+        if data.streaming:
+            for job_id in batch['ids']:jobs[job_id]['engine']='stream'
+            streamer.enqueue(batch_id)
+        else:
+            for job_id in batch['ids']:
+                if not settled(jobs[job_id]):submit(job_id)
         finish_batch(batch_id)
         return batch_response(batch_id, public)
 
 
 JOB_FIELDS = ('status', 'stage', 'progress', 'title', 'thumbnail', 'duration', 'height',
               'download_url', 'preview_url', 'filename', 'size', 'error', 'error_code',
-              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type', 'auto_retry', 'delivery_status', 'file_ready')
+              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type', 'auto_retry', 'delivery_status', 'file_ready', 'timings', 'mode', 'source_format', 'quality_label', 'prefetched', 'stream_ready', 'engine')
 
 
 def batch_response(batch_id, public=False):
@@ -352,6 +361,8 @@ def batch_response(batch_id, public=False):
         if not batch or public and not batch['public']:
             raise HTTPException(404, 'ไม่พบชุดดาวน์โหลดหรือไฟล์หมดอายุแล้ว')
         items = [dict(id=j, **{k: jobs[j][k] for k in JOB_FIELDS if k in jobs[j]}) for j in batch['ids']]
+        if batch.get('engine')=='stream':
+            for item in items:item['can_download']=streamer.can_download(item['id'])
         return {'id': batch_id, 'items': items, 'finished': bool(batch.get('finished')),
                 'total': len(items), 'ready': sum(j['status'] == 'ready' and j.get('delivery_status') == 'sent' for j in items),
                 'failed': sum(j['status'] == 'error' for j in items), 'parallel': 1,
@@ -385,6 +396,9 @@ def change_batch(batch_id, action, public=False):
     with lock:
         batch_response(batch_id, public)
         batch = batches[batch_id]
+        if batch.get('engine') == 'stream':
+            streamer.change(batch_id, action)
+            return batch_response(batch_id, public)
         if action == 'retry':
             if not batch.get('finished'):
                 raise HTTPException(409, 'โปรดรอให้ชุดนี้เสร็จก่อนลองรายการที่ไม่สำเร็จ')
@@ -519,7 +533,7 @@ def prepare(job_id: str, data: Download, url: str, emit=lambda event: None):
     opts = {
         'outtmpl': str(folder / 'source.%(ext)s'), 'noplaylist': True,
         'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
-        'retries': 0, 'fragment_retries': 0, 'max_filesize': MAX_FILE_BYTES,
+        'retries': 0, 'fragment_retries': 0, 'concurrent_fragment_downloads': 4, 'max_filesize': MAX_FILE_BYTES,
         'cachedir': False, 'restrictfilenames': True,
         'js_runtimes': {'node': {}}, 'progress_hooks': [progress],
         'match_filter': check_media, 'logger': DownloaderLogger(),
@@ -531,6 +545,9 @@ def prepare(job_id: str, data: Download, url: str, emit=lambda event: None):
         h = data.quality
         # Prefer H.264+AAC, fall back to other codecs, then inspect/convert them.
         opts.update(format=(
+            f'best[height<=?{h}][ext=mp4][acodec!=none][vcodec^=avc1]/'
+            f'best[height<=?{h}][format_id=hd][ext=mp4]/'
+            f'best[height<=?{h}][format_id=sd][ext=mp4]/'
             f'bestvideo[height<={h}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/'
             f'best[height<={h}][vcodec^=avc1][acodec!=none]/'
             f'bestvideo[height<={h}]+bestaudio/'
@@ -801,14 +818,18 @@ class AttachmentResponse(FileResponse):
 
 
 @app.get('/api/files/{job_id}')
-def file(job_id: str):
+def file(job_id: str, request: Request):
+    if jobs.get(job_id,{}).get('engine')=='stream':
+        return streamer.response(job_id, request)
     # Capability URL; proper attachment + filename works across origins, including Safari.
     job = ready_file(job_id)
     return AttachmentResponse(job_id, job)
 
 
 @app.get('/api/preview/{job_id}')
-def preview(job_id: str):
+def preview(job_id: str, request: Request):
+    if jobs.get(job_id,{}).get('engine')=='stream':
+        return streamer.response(job_id, request, True)
     job = ready_file(job_id)
     return FileResponse(job['file'], media_type='audio/mpeg' if job['file'].endswith('.mp3') else 'video/mp4',
                         headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
@@ -841,6 +862,7 @@ def archive(batch_id: str, items: str = ''):
     with lock:
         batch_response(batch_id)
         batch = batches[batch_id]
+        if batch.get('engine')=='stream':return streamer.archive_response(batch_id)
         try:
             indexes = {int(i) for i in items.split(',')} if items else None
         except ValueError:
@@ -869,6 +891,9 @@ def archive(batch_id: str, items: str = ''):
         'Content-Disposition': f'attachment; filename="KlipNivo-{batch_id[:8]}.zip"',
         'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
 
+
+from stream_queue import StreamQueue
+streamer = StreamQueue(globals())
 
 static = Path(__file__).parent / 'dist'
 if not static.exists():

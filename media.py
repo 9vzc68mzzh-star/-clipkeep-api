@@ -23,7 +23,7 @@ def probe(path):
 
 
 def normalize(source, folder, kind, height, check, report, encoder_lock, max_bytes):
-    """Copy compatible streams; encode only streams that need conversion.
+    """Copy video streams unchanged; convert only incompatible audio.
 
     The encoder semaphore bounds CPU/RAM independently of network downloads.
     MP4 is a container, not a guarantee of an iPhone-compatible video codec.
@@ -42,15 +42,13 @@ def normalize(source, folder, kind, height, check, report, encoder_lock, max_byt
         command += ['-map', f"0:{audio['index']}", '-vn', '-c:a', 'libmp3lame', '-b:a', '192k']
     else:
         compatible_video = (video.get('codec_name') == 'h264' and video.get('pix_fmt') == 'yuv420p'
-                            and int(video.get('height') or 0) <= height)
+                            and min(int(video.get('height') or 0),int(video.get('width') or 0)) <= height)
         command += ['-map', f"0:{video['index']}"]
         if audio:
             command += ['-map', f"0:{audio['index']}"]
-        command += ['-c:v', 'copy' if compatible_video else 'libx264']
         if not compatible_video:
-            # Never upscale. Even dimensions and yuv420p also cover odd-sized sources.
-            command += ['-vf', f"scale=w='trunc(iw*min(1,{height}/ih)/2)*2':h='trunc(ih*min(1,{height}/ih)/2)*2'",
-                        '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-threads', '2']
+            raise MediaError('compatible_video_unavailable')
+        command += ['-c:v', 'copy']
         if audio:
             # HE-AAC can be problematic too; copy only ordinary AAC-LC.
             compatible_audio = audio.get('codec_name') == 'aac' and audio.get('profile') == 'LC'
