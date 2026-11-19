@@ -24,6 +24,10 @@ class State:
 class StreamQueue:
     def __init__(self,env):
         self.s=State(env);self.prepare_pool=ThreadPoolExecutor(max_workers=1)
+        # Fork from a clean, single-threaded helper with yt-dlp already imported.
+        # Avoid importing it anew for every clip, without forking the API threads.
+        self.process_method='forkserver' if 'forkserver' in multiprocessing.get_all_start_methods() else 'spawn'
+        if self.process_method=='forkserver':multiprocessing.set_forkserver_preload(['fast_media'])
         self.plans={};self.plan_target=plan_worker;self.byte_source=stream_bytes
         self.active=None;self.lookahead=None
 
@@ -51,7 +55,7 @@ class StreamQueue:
         resolved=job.get('resolved_url') or batch.setdefault('resolved_links',{}).get(job['url'])
         initial={'url':job['url'],'resolved_url':resolved,'timings':{},'index':job['index'],'attempt':job['attempt'],
                  'spawned_at':started,'max_video_seconds':s.MAX_VIDEO_SECONDS,'max_file_bytes':s.MAX_FILE_BYTES}
-        context=multiprocessing.get_context('spawn');receive,send=context.Pipe(duplex=False)
+        context=multiprocessing.get_context(self.process_method);receive,send=context.Pipe(duplex=False)
         worker=context.Process(target=self.plan_target,args=(job_id,job['selection'],initial,send))
         last=time.monotonic()
         try:

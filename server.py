@@ -176,7 +176,7 @@ if multiprocessing.current_process().name == 'MainProcess':
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 7, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
+    return {'service': 'clipkeep', 'version': 8, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
 
 @app.get('/', include_in_schema=False)
 def homepage():
