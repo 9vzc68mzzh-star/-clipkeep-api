@@ -179,6 +179,33 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(resolve.call_count,1);self.assertEqual(events[-1]['kind'],'result')
             self.assertEqual(events[-1]['fields']['plan']['mode'],'direct')
 
+    def test_eleven_abandoned_or_replaced_clips_do_not_hold_the_next_batch(self):
+        for reason in ('replaced','inactive'):
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);(root/'copy.mp4').write_bytes((ensure()/'compatible.mp4').read_bytes())
+                target=functools.partial(fixture_plan,base_url='http://127.0.0.1:1',root=str(root))
+                with patch.object(server,'ROOT',root),patch.object(server,'PUBLIC_DOWNLOADS',True),patch.object(server.streamer,'plan_target',target),TestClient(server.app) as client:
+                    server.jobs.clear();server.batches.clear();server.public_requests.clear()
+                    def create(token):
+                        response=client.post('/api/public/batches',json={'streaming':True,'urls':['https://youtu.be/TST00000001']*11,'client_token':token})
+                        self.assertEqual(response.status_code,200,response.text);return response.json()
+                    def until_active(batch):
+                        deadline=time.monotonic()+3
+                        while time.monotonic()<deadline:
+                            data=client.get('/api/public/batches/'+batch['id']).json()
+                            if data['items'][0].get('can_download'):return data
+                            time.sleep(.02)
+                        self.fail('Replacement batch never became active')
+                    old=create('a'*40);until_active(old)
+                    if reason=='inactive':server.batches[old['id']]['last_seen']=time.time()-server.CLIENT_IDLE_SECONDS-1
+                    started=time.monotonic();new=create('a'*40 if reason=='replaced' else 'b'*40);until_active(new)
+                    self.assertLess(time.monotonic()-started,2)
+                    previous=client.get('/api/public/batches/'+old['id']).json()
+                    self.assertTrue(previous['finished']);self.assertEqual(previous['cancel_reason'],reason)
+                    self.assertTrue(all(job['status']=='cancelled' for job in previous['items']))
+                    client.post('/api/public/batches/'+new['id']+'/cancel')
+                    server.batches[new['id']]['future'].result(timeout=2)
+
     def test_selection_prefers_complete_mp4_and_commands_never_encode_video(self):
         info={'formats':[{'format_id':'adaptive','url':'https://video.xx.fbcdn.net/v.mp4','ext':'mp4','vcodec':'vp9','acodec':'none','height':640},
                          {'format_id':'hd','url':'https://video.xx.fbcdn.net/hd.mp4','ext':'mp4'}]}

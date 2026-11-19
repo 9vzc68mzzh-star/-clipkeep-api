@@ -130,7 +130,7 @@ class StreamQueue:
                             time.sleep(.1)
                         break
                     except Exception as exc:
-                        code=s.error_code(exc);retrying=automatic==0 and code!='cancelled'
+                        code='cancelled' if job.get('cancel') else s.error_code(exc);retrying=automatic==0 and code!='cancelled'
                         self.stop_response(job)
                         job.update(status='processing' if retrying else 'cancelled' if code=='cancelled' else 'error',
                                    stage='retrying' if retrying else 'cancelled' if code=='cancelled' else 'failed',
@@ -149,11 +149,15 @@ class StreamQueue:
                 job=s.jobs[job_id]
                 if not s.settled(job):
                     job['cancel']=True
-                    if job_id!=self.active:job.update(status='cancelled',stage='cancelled',finished=time.time())
+                    job.update(status='cancelled',stage='cancelled',finished=time.time())
+                    future=self.plans.get(job_id)
+                    if future:future.cancel()
+            future=batch.get('future')
+            if future:future.cancel()
         else:
             if not batch.get('finished'):raise HTTPException(409,'โปรดรอให้คิวจบก่อนลองใหม่')
             if sum(not b.get('finished') for b in s.batches.values())>=s.MAX_ACTIVE_BATCHES:raise HTTPException(429,'คิวเต็มชั่วคราว')
-            batch.pop('finished',None)
+            batch.pop('finished',None);batch.pop('cancel_reason',None);batch['last_seen']=time.time()
             for job_id in batch['ids']:
                 job=s.jobs[job_id]
                 if job['status']=='error' and job.get('error_code')!='invalid_link':
@@ -212,7 +216,7 @@ class StreamQueue:
                 if size>s.MAX_FILE_BYTES:raise MediaError('file_too_large')
                 target.write(chunk)
                 if first:self.timing(job_id,'first_byte_s',time.monotonic()-started);first=False
-                known=plan['details'].get('size') or 0
+                known=(plan['details'].get('size') or 0) if plan['mode']=='direct' else 0
                 job.update(bytes_sent=size,bytes_total=known)
                 job['progress']=min(98,5+size/known*93) if known else 10
                 yield chunk

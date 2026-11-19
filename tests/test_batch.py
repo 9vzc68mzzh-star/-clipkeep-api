@@ -53,6 +53,65 @@ class BatchTests(unittest.TestCase):
         second=self.batch(request_id='unique-test')
         self.assertEqual(first['id'],second['id'])
         self.assertEqual(server.pool.submit.call_count,50)
+    def test_new_browser_batch_replaces_only_its_own_active_queue(self):
+        first=self.batch([URL]*11,streaming=True,client_token='a'*40,request_id='first')
+        other=self.batch([URL],streaming=True,client_token='b'*40,request_id='other')
+        latest=self.batch([URL]*11,streaming=True,client_token='a'*40,request_id='latest')
+        old=self.client.get('/api/public/batches/'+first['id']).json()
+        self.assertTrue(old['finished']);self.assertEqual(old['cancel_reason'],'replaced')
+        self.assertTrue(all(job['status']=='cancelled' for job in old['items']))
+        self.assertFalse(server.batches[other['id']].get('finished'))
+        self.assertFalse(latest['finished']);self.assertEqual(latest['queue_position'],1)
+        self.assertNotIn('a'*40,str(latest))
+        repeated=self.batch([URL]*11,streaming=True,client_token='a'*40,request_id='latest')
+        self.assertEqual(repeated['id'],latest['id']);self.assertFalse(repeated['finished'])
+
+    def test_new_client_can_replace_a_legacy_queue_using_its_secret_batch_id(self):
+        old=self.batch([URL]*11)
+        other=self.batch([URL],client_token='b'*40)
+        new=self.batch([URL],client_token='a'*40,replace_id=old['id'])
+        self.assertTrue(server.batches[old['id']]['finished'])
+        self.assertEqual(server.batches[old['id']]['cancel_reason'],'replaced')
+        self.assertFalse(server.batches[other['id']].get('finished'))
+        self.assertFalse(new['finished'])
+
+    def test_abandoned_batches_free_slots_before_accepting_a_new_batch(self):
+        previous=[self.batch([URL]*11,streaming=stream,request_id=str(stream)) for stream in (False,True)]
+        for batch in server.batches.values():batch['last_seen']=time.time()-server.CLIENT_IDLE_SECONDS-1
+        latest=self.batch([URL],request_id='new')
+        for before in previous:
+            batch=server.batches[before['id']]
+            self.assertTrue(batch['finished']);self.assertEqual(batch['cancel_reason'],'inactive')
+            self.assertTrue(all(server.jobs[j]['status']=='cancelled' for j in batch['ids']))
+        self.assertFalse(latest['finished'])
+
+    def test_status_heartbeat_preserves_a_live_queue_and_unrelated_clients_cannot_replace_it(self):
+        first=self.batch([URL],client_token='a'*40)
+        batch=server.batches[first['id']];batch['last_seen']=time.time()-30
+        self.client.get('/api/public/batches/'+first['id'])
+        self.assertLess(time.time()-batch['last_seen'],1)
+        self.batch([URL],client_token='b'*40)
+        response=self.client.post('/api/public/batches',json={'urls':[URL],'client_token':'c'*40})
+        self.assertEqual(response.status_code,429);self.assertFalse(batch.get('finished'))
+
+    def test_active_file_bytes_keep_a_backgrounded_phone_queue_alive(self):
+        data=self.batch([URL],streaming=True)
+        batch=server.batches[data['id']];job=server.jobs[data['items'][0]['id']]
+        batch['last_seen']=time.time()-server.CLIENT_IDLE_SECONDS-1
+        job.update(delivery_status='streaming',_delivery_touched=time.monotonic())
+        server.cleanup();self.assertFalse(batch.get('finished'))
+        job['_delivery_touched']=time.monotonic()-26
+        server.cleanup();self.assertTrue(batch.get('finished'));self.assertEqual(batch['cancel_reason'],'inactive')
+
+    def test_watch_returns_when_the_next_clip_is_ready_without_a_poll_delay(self):
+        data=self.batch([URL]);item=data['items'][0];path='/api/public/batches/'+data['id']
+        def ready():
+            time.sleep(.05);server.jobs[item['id']].update(status='ready',stage='sending',file_ready=True)
+        thread=threading.Thread(target=ready);thread.start();started=time.monotonic()
+        result=self.client.get(path,params={'after':data['revision'],'wait':1}).json();thread.join()
+        self.assertNotEqual(result['revision'],data['revision']);self.assertLess(time.monotonic()-started,.6)
+        self.assertEqual(result['items'][0]['stage'],'sending')
+
     def test_retry_only_failures_preserves_ready(self):
         data=self.batch([URL]*3);ids=[i['id'] for i in data['items']]
         for key,status in zip(ids,['ready','error','ready']): server.jobs[key]['status']=status

@@ -69,7 +69,7 @@
 <p id="batch-summary" role="status" aria-live="polite"></p>
 <div class="batch-actions"><label><input type="checkbox" id="select-all" checked> เลือกทั้งหมด</label><button type="button" id="retry-failed" class="secondary-btn" hidden>ลองรายการที่ไม่สำเร็จอีกครั้ง</button></div>
 <div id="batch-list" class="batch-list"></div>
-<div class="batch-save-actions"><button type="button" id="save-selected" class="primary-btn" disabled>บันทึกทั้งหมด · Save all (0)</button><a id="zip-all" class="secondary-btn" aria-disabled="true" download>ดาวน์โหลดทั้งหมดเป็น ZIP</a></div>
+<div class="batch-save-actions"><button type="button" id="load-previous" class="secondary-btn" hidden>โหลดไฟล์รอบก่อนเข้าหน้านี้</button><button type="button" id="save-selected" class="primary-btn" disabled>บันทึกทั้งหมด · Save all (0)</button><a id="zip-all" class="secondary-btn" aria-disabled="true" download>ดาวน์โหลดทั้งหมดเป็น ZIP</a></div>
 <p id="save-location" class="save-location" role="status" aria-live="polite"></p>
 <p class="batch-save-note">คลิปจะโหลดเข้าหน้านี้โดยไม่เปิดหน้าต่างดาวน์โหลด · แตะบันทึกเพื่อเลือก “บันทึกวิดีโอ” หรือ “บันทึกไปยังไฟล์” ตามที่เครื่องรองรับ · เปิดหน้านี้ไว้จนบันทึกเสร็จ · หากแชร์ไฟล์ชุดใหญ่ไม่ได้ ให้เลือกน้อยลงหรือใช้ ZIP สำรอง (เก็บ 1 ชั่วโมงหลังคิวจบ)</p>
 </section>
@@ -101,5 +101,5 @@
 
 <dialog id="clip-preview"><div class="dialog-top"><h2 id="preview-title">ดูคลิป</h2><button class="icon-btn" data-close="clip-preview" aria-label="ปิดตัวอย่าง">✕</button></div><video id="preview-video" controls playsinline preload="metadata" hidden></video><audio id="preview-audio" controls preload="metadata" hidden></audio></dialog>
 <script src="/app.js?v=klipnivo-batch-1"></script>
-<script src="/batch.js?v=6"></script>
+<script src="/batch.js?v=7"></script>
 </body></html>

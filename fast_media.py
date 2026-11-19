@@ -114,6 +114,7 @@ def plan_worker(job_id, selection, initial, connection):
         connection.send({'kind':'result','fields':{'plan':plan,'resolved_url':resolved,'timings':timings,'title':str(info.get('title') or 'คลิปของคุณ')[:200],
                          'thumbnail':info.get('thumbnail'),'duration':info.get('duration'),'height':details.get('height'),
                          'quality_label':quality_edge(details.get('width'),details.get('height')),
+                         'bytes_total':details.get('size',0) if plan['mode']=='direct' else 0,
                          'video_codec':details.get('video_codec'),'audio_codec':details.get('audio_codec'),
                          'mode':plan['mode'],'source_format':plan['source_format'],
                          'warning':'คลิปต้นฉบับไม่มีแทร็กเสียง' if selection['format']=='mp4' and not details.get('audio_codec') else None},'progressed':True})

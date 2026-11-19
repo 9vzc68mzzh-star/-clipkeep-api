@@ -1,5 +1,8 @@
 """KlipNivo API. Run behind HTTPS. Requires CLIPKEEP_API_KEY and CORS_ORIGINS."""
 import io
+import asyncio
+import hashlib
+import json
 import zipfile
 import multiprocessing
 import signal
@@ -37,6 +40,7 @@ PUBLIC_RATE_WINDOW = 600
 PUBLIC_RATE_LIMIT = 5  # Per batch, not per clip.
 MAX_BATCH_LINKS = 200
 MAX_ACTIVE_BATCHES = 2
+CLIENT_IDLE_SECONDS = 90
 STALL_SECONDS = 75
 DELIVERY_SECONDS = 75
 ATTEMPT_SECONDS = 1200
@@ -89,6 +93,8 @@ class Batch(BaseModel):
     format: str = 'mp4'
     quality: str = '720'
     request_id: str = Field(default='', max_length=80)
+    client_token: str = Field(default='', max_length=100, pattern=r'^$|^[A-Za-z0-9_-]{32,100}$')
+    replace_id: str = Field(default='', max_length=100, pattern=r'^[A-Za-z0-9_-]*$')
 
 def authenticate(authorization: str = Header(default='')):
     if not API_KEY:
@@ -125,10 +131,31 @@ def finish_batch(batch_id):
         batch['finished'] = time.time()
 
 
+def cancel_batch_work(batch_id, reason='cancelled'):
+    batch = batches[batch_id]
+    if batch.get('finished'):
+        return
+    batch['cancel_reason'] = reason
+    if batch.get('engine') == 'stream':
+        streamer.change(batch_id, 'cancel')
+    else:
+        for job_id in batch['ids']:
+            job = jobs[job_id]
+            if not settled(job):
+                job.update(cancel=True, status='cancelled', stage='cancelled', finished=time.time())
+                future = futures.get(job_id)
+                if future: future.cancel()
+    finish_batch(batch_id)
+
+
 def cleanup():
     now = time.time()
     with lock:
         for batch_id, batch in list(batches.items()):
+            transferring = any(jobs[j].get('delivery_status') in ('streaming','requested') and
+                               time.monotonic()-jobs[j].get('_delivery_touched',jobs[j].get('delivery_touched',0)) < 25 for j in batch['ids'])
+            if not batch.get('finished') and not transferring and now - batch.get('last_seen', batch['created']) > CLIENT_IDLE_SECONDS:
+                cancel_batch_work(batch_id, 'inactive')
             if batch.get('finished') and now - batch['finished'] > TTL and not batch.get('readers'):
                 for job_id in batch['ids']:
                     jobs.pop(job_id, None)
@@ -169,14 +196,14 @@ def submit(job_id):
 
 def janitor():
     while True:
-        time.sleep(60)
+        time.sleep(10)
         cleanup()
 if multiprocessing.current_process().name == 'MainProcess':
     threading.Thread(target=janitor, daemon=True).start()
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 8, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
+    return {'service': 'clipkeep', 'version': 9, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720', 'long_poll': True, 'client_idle_seconds': CLIENT_IDLE_SECONDS}
 
 @app.get('/', include_in_schema=False)
 def homepage():
@@ -246,18 +273,31 @@ def enqueue_batch(data, public, client):
     valid_options(data)
     cleanup()
     with lock:
-        # A stable request ID lets a client retry a lost POST response safely.
+        # A browser capability owns its old queue even after changing network/IP.
+        def same_owner(batch):
+            return (batch.get('client_token') == data.client_token if data.client_token else
+                    not batch.get('client_token') and batch['client'] == client)
         if data.request_id:
             for batch_id, batch in batches.items():
-                if batch['client'] == client and batch['public'] == public and batch['request_id'] == data.request_id:
+                if same_owner(batch) and batch['public'] == public and batch['request_id'] == data.request_id:
+                    batch['last_seen'] = time.time()
                     return batch_response(batch_id, public)
-        if sum(not b.get('finished') for b in batches.values()) >= MAX_ACTIVE_BATCHES or len(jobs) + len(data.urls) > 800:
-            raise HTTPException(429, 'คิวดาวน์โหลดเต็มชั่วคราว กรุณาลองใหม่เมื่อชุดก่อนเสร็จ')
+        replacing = [key for key,batch in batches.items() if data.client_token and
+                     batch['public'] == public and same_owner(batch) and not batch.get('finished')]
+        prior = batches.get(data.replace_id)
+        if prior and prior['public'] == public and not prior.get('finished') and data.replace_id not in replacing:
+            # The unguessable batch ID is already its cancellation capability.
+            replacing.append(data.replace_id)
+        active = sum(not b.get('finished') for b in batches.values()) - len(replacing)
+        if active >= MAX_ACTIVE_BATCHES or len(jobs) + len(data.urls) > 800:
+            raise HTTPException(429, 'มีชุดดาวน์โหลดอื่นกำลังทำงานอยู่ กรุณาลองอีกครั้ง คิวที่ไม่มีผู้ใช้งานจะหยุดอัตโนมัติ')
         if public:
             rate_limit(client)
+        for old_id in replacing:
+            cancel_batch_work(old_id, 'replaced')
         batch_id = secrets.token_urlsafe(32)
         batch = {'ids': [], 'created': time.time(), 'public': public, 'client': client,
-                 'request_id': data.request_id, 'format': data.format, 'readers': 0, 'engine': 'stream' if data.streaming else 'buffered'}
+                 'request_id': data.request_id, 'client_token': data.client_token, 'last_seen': time.time(), 'format': data.format, 'readers': 0, 'engine': 'stream' if data.streaming else 'buffered'}
         batches[batch_id] = batch
         for index, raw in enumerate(data.urls, 1):
             job_id = secrets.token_urlsafe(32)
@@ -296,7 +336,12 @@ def batch_response(batch_id, public=False):
         items = [dict(id=j, **{k: jobs[j][k] for k in JOB_FIELDS if k in jobs[j]}) for j in batch['ids']]
         if batch.get('engine')=='stream':
             for item in items:item['can_download']=streamer.can_download(item['id'])
+        waiting = [key for key,value in sorted(batches.items(),key=lambda pair:pair[1]['created']) if not value.get('finished')]
+        position = waiting.index(batch_id) if batch_id in waiting else 0
+        signature = [(j['id'],j['status'],j.get('stage'),j.get('attempt'),int(j.get('progress',0)//5) if not j.get('stream_ready') else 0,j.get('can_download'),j.get('file_ready'),j.get('delivery_status'),j.get('title'),j.get('error_code'),j.get('timings')) for j in items]
+        revision = hashlib.blake2s(json.dumps([signature, bool(batch.get('finished')), position],sort_keys=True).encode(),digest_size=12).hexdigest()
         return {'id': batch_id, 'items': items, 'finished': bool(batch.get('finished')),
+                'revision': revision, 'queue_position': position, 'cancel_reason': batch.get('cancel_reason'),
                 'total': len(items), 'ready': sum(j['status'] == 'ready' and j.get('delivery_status') == 'sent' for j in items),
                 'failed': sum(j['status'] == 'error' for j in items), 'parallel': 1,
                 'prepared': sum(bool(j.get('file_ready')) for j in items),
@@ -305,23 +350,29 @@ def batch_response(batch_id, public=False):
                 'expires_in': max(0, int(TTL - (time.time() - batch['finished']))) if batch.get('finished') else None}
 
 
-@app.get('/api/batches/{batch_id}', dependencies=[Depends(authenticate)])
-def get_batch(batch_id: str, response: Response):
-    response.headers['Cache-Control'] = 'no-store'
+async def watch_batch(batch_id, public, response, request, after='', wait=0):
     cleanup()
-    return batch_response(batch_id)
+    snapshot = batch_response(batch_id, public)
+    batches[batch_id]['last_seen'] = time.time()
+    deadline = time.monotonic() + min(15, max(0, wait))
+    while after and snapshot['revision'] == after and not snapshot['finished'] and time.monotonic() < deadline:
+        if await request.is_disconnected():
+            break
+        await asyncio.sleep(.15)
+        snapshot = batch_response(batch_id, public)
+    response.headers['Cache-Control'] = 'no-store'
+    return snapshot
+
+
+@app.get('/api/batches/{batch_id}', dependencies=[Depends(authenticate)])
+async def get_batch(batch_id: str, response: Response, request: Request, after: str = '', wait: float = 0):
+    return await watch_batch(batch_id, False, response, request, after, wait)
 
 
 @app.get('/api/public/batches/{batch_id}')
-def get_public_batch(batch_id: str, response: Response):
+async def get_public_batch(batch_id: str, response: Response, request: Request, after: str = '', wait: float = 0):
     require_public()
-    return get_batch_public_response(batch_id, response)
-
-
-def get_batch_public_response(batch_id, response):
-    response.headers['Cache-Control'] = 'no-store'
-    cleanup()
-    return batch_response(batch_id, True)
+    return await watch_batch(batch_id, True, response, request, after, wait)
 
 
 def change_batch(batch_id, action, public=False):
@@ -329,6 +380,10 @@ def change_batch(batch_id, action, public=False):
     with lock:
         batch_response(batch_id, public)
         batch = batches[batch_id]
+        batch['last_seen'] = time.time()
+        if action == 'cancel':
+            cancel_batch_work(batch_id)
+            return batch_response(batch_id, public)
         if batch.get('engine') == 'stream':
             streamer.change(batch_id, action)
             return batch_response(batch_id, public)

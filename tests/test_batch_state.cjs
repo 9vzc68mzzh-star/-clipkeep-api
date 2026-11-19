@@ -2,7 +2,7 @@
 const test=require('node:test'), assert=require('node:assert/strict'), vm=require('node:vm'), fs=require('node:fs');
 const source=fs.readFileSync('dist/batch.js','utf8');
 function storage(){const m=new Map();return {getItem:k=>m.get(k)??null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k),entries:()=>Object.fromEntries(m)};}
-function launch({session=storage(),apiHandler,fetchHandler}={}){
+function launch({session=storage(),local=storage(),base='https://backend.example',apiHandler,fetchHandler}={}){
  const elements=new Map(),timers=[],requests=[],saves=[],messages=[],fetches=[],shares=[];let uuid=0;
  class Element{
   constructor(tag='div'){this.tag=tag;this.hidden=false;this.disabled=false;this.checked=true;this.value='';this.dataset={};this.children=[];this.handlers={};this.parts=new Map();}
@@ -16,11 +16,11 @@ function launch({session=storage(),apiHandler,fetchHandler}={}){
   emit(type,extra={}){const event={target:this,preventDefault(){},...extra};return Promise.all([...(this.handlers[type]||[]).map(fn=>fn(event)),this['on'+type]?.(event)]);}
  }
  const $=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};$('#quality').value='720';
- const context=vm.createContext({$,console,URL,Blob,File,Headers,AbortController,AbortSignal,sessionStorage:session,
+ const context=vm.createContext({$,console,URL,Blob,File,Headers,AbortController,AbortSignal,sessionStorage:session,localStorage:local,
   document:{createElement:tag=>new Element(tag),querySelector:$,querySelectorAll:()=>[],addEventListener(){}},
   navigator:{share:async data=>{shares.push(data);},canShare:()=>true,clipboard:{readText:async()=>''}},location:{origin:'https://site.example'},
   setTimeout:(fn,ms)=>{const item={fn,ms};timers.push(item);return item;},clearTimeout:item=>{if(item)item.cancelled=true;},
-  crypto:{randomUUID:()=>`request-${++uuid}`},apiBase:'https://backend.example',apiKey:'owner-key',format:'mp4',busy:false,records:[],
+  crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++uuid).padStart(12,'0')}`},apiBase:base,apiKey:'owner-key',format:'mp4',busy:false,records:[],
   checkBackend:async()=>({batch_limit:200,public_downloads:true,ordered_delivery:true}),
   api:async(path,options={},base,key)=>{requests.push({path,options,base,key});return apiHandler?apiHandler(path,options,base,key):snapshot([]);},
   saveAnchor:(url,name)=>saves.push({url,name}),message:text=>messages.push(text),toast:()=>{},persist:()=>{},parseLink:url=>({url,source:'youtube'}),
@@ -40,13 +40,13 @@ test('deselect all also deselects clips that finish later',async()=>{
  await app.start();app.$('#select-all').checked=false;await app.$('#select-all').emit('change');await app.tick(1500);
  assert.equal(app.$('#zip-all').disabled,false);assert(app.$('#zip-all').textContent.includes('(2)'));assert.equal(app.rows()[1].querySelector('input').checked,false);
 });
-test('refresh restores the same queue and refetches tab-local files without downloads',async()=>{
+test('refresh restores queue history without refetching completed clips automatically',async()=>{
  const session=storage(),items=[job(1),job(2,'queued')];
  const first=launch({session,apiHandler:()=>snapshot(items,false)});await first.start();await first.settle();
  assert.equal(first.fetches.length,1);assert.equal(first.saves.length,0);
  const reopened=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});await reopened.settle();await reopened.tick(1500);await reopened.settle();
  assert.equal(reopened.rows().length,2);assert.equal(reopened.requests.filter(r=>post(r.options)).length,0);
- assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,2);
+ assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,0);
  assert(!JSON.stringify(session.entries()).includes('owner-key'));
 });
 test('expired queue can restart rather than repeatedly checking a missing queue',async()=>{
@@ -65,7 +65,9 @@ test('refreshing a finished queue does not resend any already-requested files',a
  const session=storage(),first=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});
  await first.start();await first.tick(1100);await first.tick(1100);assert.equal(first.fetches.length,2);assert.equal(first.saves.length,0);
  const reopened=launch({session,apiHandler:()=>snapshot([job(1),job(2)])});await reopened.settle();await reopened.tick(1100);
- assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,2);assert.equal(reopened.context.busy,false);
+ assert.equal(reopened.saves.length,0);assert.equal(reopened.fetches.length,0);assert.equal(reopened.context.busy,false);
+ assert.equal(reopened.$('#load-previous').hidden,false);
+ await reopened.$('#load-previous').emit('click');await reopened.settle();assert.equal(reopened.fetches.length,2);assert.equal(reopened.saves.length,0);
 });
 test('clearing an in-flight retry cancels the old queue after the reply arrives',async()=>{
  let resolveRetry;const pending=new Promise(resolve=>resolveRetry=resolve);
@@ -190,4 +192,21 @@ test('streamed response is fully read into a File before it becomes Ready or sha
  release();await app.settle();app.$('#save-selected').onclick();
  assert.equal(app.shares.length,1);assert.deepEqual(Array.from(new Uint8Array(await app.shares[0].files[0].arrayBuffer())),[1,2,3,4]);
  assert.equal(app.saves.length,0);
+});
+
+test('one browser identity survives tabs and a new batch can replace its old work',async()=>{
+ const local=storage(),first=launch({local,apiHandler:()=>snapshot([job(1)])});await first.start();
+ const second=launch({local,apiHandler:()=>snapshot([job(2)])});await second.start();
+ const a=JSON.parse(first.requests[0].options.body),b=JSON.parse(second.requests[0].options.body);
+ assert.equal(a.client_token,b.client_token);assert(a.client_token.length>=32);
+ assert(!JSON.stringify(second.session.entries()).includes('owner-key'));
+});
+test('revision updates dispatch the next ready clip without a 1.5-second timer',async()=>{
+ let resolveWatch;const waiting=new Promise(resolve=>resolveWatch=resolve);
+ const active={...job(1),engine:'stream',stream_ready:true,can_download:true,file_ready:false,delivery_status:'waiting',stage:'sending'};
+ const app=launch({apiHandler:(path,options)=>options.method==='POST'?{...snapshot([active],false),revision:'v1'}:waiting});
+ await app.start();await app.settle();assert(app.requests.some(r=>r.path.includes('?after=v1&wait=15')));
+ assert.equal(app.timers.filter(t=>t.ms===1500).length,0);
+ resolveWatch({...snapshot([{...active,can_download:false,file_ready:true,delivery_status:'sent'}]),revision:'v2'});await app.settle();
+ assert.equal(app.fetches.length,1);assert.equal(app.saves.length,0);
 });
