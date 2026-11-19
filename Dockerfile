@@ -4,7 +4,7 @@ RUN useradd --create-home clipkeep && mkdir /tmp/clipkeep && chown clipkeep:clip
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY --chown=clipkeep:clipkeep server.py media.py fast_media.py stream_queue.py .
+COPY --chown=clipkeep:clipkeep server.py media.py source_utils.py fast_media.py stream_queue.py .
 COPY --chown=clipkeep:clipkeep dist ./dist
 USER clipkeep
 ENV CLIPKEEP_PUBLIC_DOWNLOADS=true

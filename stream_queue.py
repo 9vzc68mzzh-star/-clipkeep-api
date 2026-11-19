@@ -49,7 +49,8 @@ class StreamQueue:
         s=self.s;job=s.jobs[job_id];batch=s.batches[job['batch_id']]
         started=time.monotonic();job.setdefault('_started',started)
         resolved=job.get('resolved_url') or batch.setdefault('resolved_links',{}).get(job['url'])
-        initial={'url':job['url'],'resolved_url':resolved,'timings':{},'index':job['index'],'attempt':job['attempt']}
+        initial={'url':job['url'],'resolved_url':resolved,'timings':{},'index':job['index'],'attempt':job['attempt'],
+                 'spawned_at':started,'max_video_seconds':s.MAX_VIDEO_SECONDS,'max_file_bytes':s.MAX_FILE_BYTES}
         context=multiprocessing.get_context('spawn');receive,send=context.Pipe(duplex=False)
         worker=context.Process(target=self.plan_target,args=(job_id,job['selection'],initial,send))
         last=time.monotonic()

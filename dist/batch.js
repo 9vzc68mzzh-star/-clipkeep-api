@@ -109,7 +109,7 @@
     el.querySelector('input').disabled = !canSave(job);
     el.querySelector('.clip-actions').hidden = !canSave(job);
     el.querySelector('[data-action="save"]').disabled = job.engine==='stream' && !run.finished;
-    const labels={resolve_s:'ลิงก์',extract_s:'ข้อมูล',probe_s:'ตรวจรูปแบบ',wait_turn_s:'รอส่ง',download_s:'รับข้อมูล',merge_s:'รวม/เสียง',send_s:'ส่ง',total_s:'รวมเวลา'};
+    const labels={startup_s:'เริ่มงาน',resolve_s:'ลิงก์',extract_s:'ข้อมูล',probe_s:'ตรวจรูปแบบ',wait_turn_s:'รอส่ง',download_s:'รับข้อมูล',merge_s:'รวม/เสียง',send_s:'ส่ง',total_s:'รวมเวลา'};
     el.querySelector('.clip-timing').textContent=Object.entries(labels).filter(([key])=>job.timings?.[key]!=null).map(([key,label])=>`${label} ${Number(job.timings[key]).toFixed(2)}s`).join(' · ');
     if (run.sent.has(job.id)) el.querySelector('.clip-save-status').textContent='ส่งดาวน์โหลดแล้ว · ตรวจสอบใน Files / Downloads';
     if (job.thumbnail && !el.querySelector('img')) {

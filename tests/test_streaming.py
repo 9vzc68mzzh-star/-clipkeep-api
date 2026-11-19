@@ -171,7 +171,7 @@ class StreamingTests(unittest.TestCase):
                 calls.append(url)
                 if len(calls)==1:raise RuntimeError('connection reset')
                 return {'title':'Cached share','duration':2,'formats':[{'url':'https://video.xx.fbcdn.net/clip.mp4','format_id':'hd','ext':'mp4','vcodec':'avc1.64001f','acodec':'mp4a.40.2','width':1280,'height':720}]}
-        with patch('fast_media.os.setsid'),patch.object(server,'resolve_facebook_share',return_value='https://www.facebook.com/reel/123/') as resolve,patch('fast_media.yt_dlp.YoutubeDL',Downloader):
+        with patch('fast_media.os.setsid'),patch('fast_media.resolve_facebook_share',return_value='https://www.facebook.com/reel/123/') as resolve,patch('fast_media.yt_dlp.YoutubeDL',Downloader):
             initial={'url':'https://www.facebook.com/share/v/example/'}
             plan_worker('fixture',{'format':'mp4','quality':'720'},initial,Connection())
             resolved=next(event['fields']['resolved_url'] for event in events if event['kind']=='update')

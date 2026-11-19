@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import yt_dlp
 from media import MediaError
+from source_utils import resolve_facebook_share, error_code
 
 MEDIA_HOSTS = ('.fbcdn.net', '.fbsbx.com', '.googlevideo.com', '.youtube.com', '.facebook.com', '.akamaihd.net')
 
@@ -91,11 +92,11 @@ def choose_plan(info, kind, quality, inspect=inspect_source):
 
 def plan_worker(job_id, selection, initial, connection):
     os.setsid()
-    import server
     timings=dict(initial.get('timings') or {})
+    timings['startup_s']=round(time.monotonic()-initial.get('spawned_at',time.monotonic()),4)
     try:
         started=time.monotonic()
-        resolved=initial.get('resolved_url') or server.resolve_facebook_share(initial['url'])
+        resolved=initial.get('resolved_url') or resolve_facebook_share(initial['url'])
         timings['resolve_s']=round(time.monotonic()-started,4)
         connection.send({'kind':'update','fields':{'resolved_url':resolved,'timings':dict(timings)},'progressed':True})
         opts={'quiet':True,'no_warnings':True,'noplaylist':True,'skip_download':True,'socket_timeout':20,'retries':0,
@@ -105,10 +106,10 @@ def plan_worker(job_id, selection, initial, connection):
         with yt_dlp.YoutubeDL(opts) as ydl:info=ydl.extract_info(resolved,download=False)
         timings['extract_s']=round(time.monotonic()-started,4)
         if info.get('is_live'):raise MediaError('live_video')
-        if (info.get('duration') or 0)>server.MAX_VIDEO_SECONDS:raise MediaError('duration_limit')
+        if (info.get('duration') or 0)>initial.get('max_video_seconds',7200):raise MediaError('duration_limit')
         started=time.monotonic();plan=choose_plan(info,selection['format'],int(selection['quality']))
         timings['probe_s']=round(time.monotonic()-started,4)
-        if plan['details'].get('size',0)>server.MAX_FILE_BYTES:raise MediaError('file_too_large')
+        if plan['details'].get('size',0)>initial.get('max_file_bytes',512*1024*1024):raise MediaError('file_too_large')
         details=plan['details']
         connection.send({'kind':'result','fields':{'plan':plan,'resolved_url':resolved,'timings':timings,'title':str(info.get('title') or 'คลิปของคุณ')[:200],
                          'thumbnail':info.get('thumbnail'),'duration':info.get('duration'),'height':details.get('height'),
@@ -117,7 +118,7 @@ def plan_worker(job_id, selection, initial, connection):
                          'mode':plan['mode'],'source_format':plan['source_format'],
                          'warning':'คลิปต้นฉบับไม่มีแทร็กเสียง' if selection['format']=='mp4' and not details.get('audio_codec') else None},'progressed':True})
     except Exception as exc:
-        connection.send({'kind':'error','code':server.error_code(exc),'type':type(exc).__name__})
+        connection.send({'kind':'error','code':error_code(exc),'type':type(exc).__name__})
     finally:connection.close()
 
 

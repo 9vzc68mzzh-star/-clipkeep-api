@@ -162,7 +162,7 @@ class BackendTests(unittest.TestCase):
                 response.__enter__.return_value.geturl.return_value = direct
                 opener = MagicMock()
                 opener.open.return_value = response
-                with patch.object(server, 'build_opener', return_value=opener):
+                with patch('source_utils.build_opener', return_value=opener):
                     resolved = server.resolve_facebook_share(shared)
                 self.assertEqual(resolved, direct)
                 # Regression: the real restricted yt-dlp configuration has no
@@ -184,7 +184,7 @@ class BackendTests(unittest.TestCase):
         for target in ('https://www.facebook.com/login/', 'https://www.facebook.com/share/v/example/', 'https://evil.test/reel/123', 'https://www.youtube.com/watch?v=BaW_jenozKc'):
             response = MagicMock()
             response.__enter__.return_value.geturl.return_value = target
-            with patch.object(server, 'build_opener') as opener:
+            with patch('source_utils.build_opener') as opener:
                 opener.return_value.open.return_value = response
                 with self.subTest(target=target), self.assertRaises(server.DownloadFailure) as raised:
                     server.resolve_facebook_share('https://www.facebook.com/share/v/example/')
@@ -204,7 +204,7 @@ class BackendTests(unittest.TestCase):
                 return {'title':'Facebook fixture', 'duration':3832.361, 'height':720}
         response = MagicMock()
         response.__enter__.return_value.geturl.return_value = expected
-        with patch.object(server, 'build_opener') as opener, patch.object(server.yt_dlp, 'YoutubeDL', FakeDownloader):
+        with patch('source_utils.build_opener') as opener, patch.object(server.yt_dlp, 'YoutubeDL', FakeDownloader):
             opener.return_value.open.return_value = response
             result = client.post('/api/jobs', headers=AUTH, json={'url':'https://www.facebook.com/share/v/example/'})
             job_id = result.json()['id']

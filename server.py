@@ -1,7 +1,6 @@
 """KlipNivo API. Run behind HTTPS. Requires CLIPKEEP_API_KEY and CORS_ORIGINS."""
 import io
 import zipfile
-import errno
 import multiprocessing
 import signal
 import hmac
@@ -15,16 +14,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request as URLRequest, build_opener
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import yt_dlp
-from yt_dlp.extractor.facebook import FacebookIE, FacebookReelIE
 from media import MediaError, normalize
+from source_utils import FACEBOOK_HOSTS, DownloadFailure, error_code, FacebookRedirectHandler, resolve_facebook_share
 
 API_KEY = os.environ.get('CLIPKEEP_API_KEY', '')
 ORIGINS = [s.strip() for s in os.environ.get('CORS_ORIGINS', '').split(',') if s.strip()]
@@ -45,7 +42,6 @@ DELIVERY_SECONDS = 75
 ATTEMPT_SECONDS = 1200
 MAX_STORED_BYTES = 4 * 1024 * 1024 * 1024
 TTL = 3600
-FACEBOOK_HOSTS = ('facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.watch')
 ERROR_MESSAGES = {
     'share_link': 'เปิดลิงก์แชร์ Facebook ไม่สำเร็จ กรุณาเปิดคลิปใน Facebook แล้วคัดลอกลิงก์วิดีโอโดยตรงมาลองอีกครั้ง',
     'file_too_large': 'ไฟล์เกินขนาดสูงสุด 512 MB กรุณาเลือกคุณภาพ 720p หรือ 480p แล้วลองใหม่',
@@ -93,69 +89,6 @@ class Batch(BaseModel):
     format: str = 'mp4'
     quality: str = '720'
     request_id: str = Field(default='', max_length=80)
-
-class DownloadFailure(Exception):
-    def __init__(self, code):
-        self.code = code
-        super().__init__(code)
-
-def error_code(exc):
-    if isinstance(exc, (DownloadFailure, MediaError)):
-        return exc.code
-    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
-        return 'storage_limit'
-    detail = str(exc).lower()
-    if 'file_too_large' in detail or 'larger than max-filesize' in detail:
-        return 'file_too_large'
-    if 'duration_limit' in detail:
-        return 'duration_limit'
-    if 'time_limit' in detail:
-        return 'time_limit'
-    if isinstance(exc, HTTPError) and exc.code == 429 or 'http error 429' in detail:
-        return 'rate_limited'
-    if isinstance(exc, HTTPError) and exc.code in (401, 403) or any(s in detail for s in ('http error 403', 'http error 401', 'login required', 'log in', 'sign in', 'private video', 'video unavailable')):
-        return 'access_restricted'
-    if 'unsupported url' in detail:
-        return 'share_link'
-    if 'requested format is not available' in detail:
-        return 'format_unavailable'
-    if 'unable to obtain file audio codec' in detail:
-        return 'audio_unavailable'
-    if any(s in detail for s in ('cannot parse data', 'unable to extract', 'no video formats found')):
-        return 'extractor_error'
-    if isinstance(exc, (URLError, TimeoutError)) or any(s in detail for s in ('timed out', 'unable to download', 'connection refused', 'connection reset')):
-        return 'network_error'
-    return 'download_failed'
-
-class FacebookRedirectHandler(HTTPRedirectHandler):
-    # Resolve share links without enabling yt-dlp's unrestricted generic extractor.
-    max_redirections = 5
-    max_repeats = 2
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        try:
-            u = urlparse(newurl)
-            if u.scheme not in ('https', 'http') or u.hostname not in FACEBOOK_HOSTS or u.username or u.password or u.port:
-                raise ValueError()
-        except (ValueError, TypeError):
-            raise DownloadFailure('share_link') from None
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-def resolve_facebook_share(url):
-    u = urlparse(url)
-    if u.hostname != 'fb.watch' and not re.match(r'^/share/(v|r)/', u.path):
-        return url
-    request = URLRequest(url, headers={'User-Agent': 'ClipKeep/2.0'})
-    with build_opener(FacebookRedirectHandler()).open(request, timeout=20) as response:
-        resolved = response.geturl()
-    # A 200 login/consent page is not a resolved video. Do not download that page.
-    try:
-        resolved = validate_url(resolved)
-    except HTTPException:
-        raise DownloadFailure('share_link') from None
-    if urlparse(resolved).hostname not in FACEBOOK_HOSTS or not any(ie.suitable(resolved) for ie in (FacebookIE, FacebookReelIE)):
-        raise DownloadFailure('share_link')
-    return resolved
 
 def authenticate(authorization: str = Header(default='')):
     if not API_KEY:
@@ -243,7 +176,7 @@ if multiprocessing.current_process().name == 'MainProcess':
 
 @app.get('/api/health')
 def health():
-    return {'service': 'clipkeep', 'version': 6, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
+    return {'service': 'clipkeep', 'version': 7, 'public_downloads': PUBLIC_DOWNLOADS, 'batch_limit': MAX_BATCH_LINKS, 'parallel_downloads': 1, 'stall_seconds': STALL_SECONDS, 'ordered_delivery': True, 'streaming': True, 'prefetch_limit': 1, 'video_encoding': False, 'default_quality': '720'}
 
 @app.get('/', include_in_schema=False)
 def homepage():
