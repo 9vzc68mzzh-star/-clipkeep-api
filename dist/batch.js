@@ -374,7 +374,7 @@
     const count = lines().length;
     $('#detected').textContent=count ? `${count} ลิงก์` : '';
     $('#form-message').hidden=true;
-    if (count && !busy && input.value !== lastInput) timer=setTimeout(start,event?.inputType==='insertFromPaste'?0:600);
+    if (count && !busy && (input.value !== lastInput || event?.inputType==='insertFromPaste')) timer=setTimeout(start,event?.inputType==='insertFromPaste'?0:600);
   }
   function preview(job) {
     const audio = job.filename.endsWith('.mp3');

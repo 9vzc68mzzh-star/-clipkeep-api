@@ -210,3 +210,15 @@ test('revision updates dispatch the next ready clip without a 1.5-second timer',
  resolveWatch({...snapshot([{...active,can_download:false,file_ready:true,delivery_status:'sent'}]),revision:'v2'});await app.settle();
  assert.equal(app.fetches.length,1);assert.equal(app.saves.length,0);
 });
+
+test('pasting the same links again after a queue-full rejection starts a fresh request',async()=>{
+ let attempts=0;const app=launch({apiHandler:(path,options)=>{
+  if(options.method==='POST'&&++attempts===1)throw Object.assign(Error('queue full'),{status:429});
+  return snapshot([job(1)]);
+ }});
+ await app.start();assert.equal(attempts,1);assert.equal(app.context.busy,false);
+ await app.$('#video-url').emit('input',{inputType:'insertFromPaste'});await app.tick(0);await app.settle();
+ assert.equal(attempts,2);assert.equal(app.fetches.length,1);assert.equal(app.saves.length,0);
+ const creates=app.requests.filter(r=>r.path==='/api/public/batches').map(r=>JSON.parse(r.options.body));
+ assert.notEqual(creates[0].request_id,creates[1].request_id);assert.equal(creates[0].client_token,creates[1].client_token);
+});
