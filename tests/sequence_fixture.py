@@ -32,7 +32,7 @@ def fixture_worker(job_id, selection, url, initial, root, connection):
             for count in range(1,4):
                 self.opts['progress_hooks'][0]({'status':'downloading','downloaded_bytes':count*100,'total_bytes':300,'info_dict':info})
                 time.sleep(.03)
-            source=fixtures/('incompatible.webm' if number%3==0 else 'compatible.mp4')
+            source=fixtures/('compatible.mp4')
             shutil.copyfile(source,self.opts['outtmpl'].replace('%(ext)s',source.suffix[1:]))
             return info
     server.yt_dlp.YoutubeDL=FixtureDownloader

@@ -133,10 +133,9 @@ class MediaTests(unittest.TestCase):
         self.assertEqual((d['video_codec'],d['audio_codec']),('h264','aac'))
         self.assertEqual(probe(output)['streams'][0]['pix_fmt'],'yuv420p')
         content=output.read_bytes();self.assertLess(content.find(b'moov'),content.find(b'mdat'))
-    def test_vp9_opus_transcodes_to_h264_aac_and_decodes(self):
-        output,d,r=self.convert(FIXTURES/'incompatible.webm')
-        self.assertEqual((d['video_codec'],d['audio_codec']),('h264','aac'))
-        self.assertTrue(r)
+    def test_incompatible_video_is_rejected_instead_of_encoded(self):
+        with self.assertRaises(MediaError) as error:self.convert(FIXTURES/'incompatible.webm')
+        self.assertEqual(error.exception.code,'compatible_video_unavailable')
     def test_ffmpeg_na_progress_does_not_abort_a_valid_conversion(self):
         from unittest.mock import patch
         original=subprocess.Popen
@@ -151,7 +150,7 @@ class MediaTests(unittest.TestCase):
             reads.append(str(path))
             return 'out_time_us=N/A\nprogress=continue\n'
         with patch('media.subprocess.Popen', side_effect=started), patch.object(Path,'read_text',pending_progress):
-            _,details,_=self.convert(FIXTURES/'incompatible.webm')
+            _,details,_=self.convert(FIXTURES/'compatible.mp4')
         self.assertEqual((details['video_codec'],details['audio_codec']),('h264','aac'))
         self.assertTrue(reads)
 
@@ -171,8 +170,8 @@ class MediaTests(unittest.TestCase):
             with self.assertRaises(MediaError) as e:self.convert(silent,'mp3')
             self.assertEqual(e.exception.code,'audio_unavailable')
     def test_resolution_limit_and_cancellation(self):
-        _,d,_=self.convert(FIXTURES/'compatible.mp4',height=90)
-        self.assertLessEqual(d['height'],90)
+        with self.assertRaises(MediaError) as error:self.convert(FIXTURES/'compatible.mp4',height=90)
+        self.assertEqual(error.exception.code,'compatible_video_unavailable')
         with tempfile.TemporaryDirectory() as tmp:
             def abort():raise RuntimeError('cancelled')
             with self.assertRaisesRegex(RuntimeError,'cancelled'):

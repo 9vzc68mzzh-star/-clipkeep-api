@@ -50,8 +50,8 @@ def normalize(source, folder, kind, height, check, report, encoder_lock, max_byt
             raise MediaError('compatible_video_unavailable')
         command += ['-c:v', 'copy']
         if audio:
-            # HE-AAC can be problematic too; copy only ordinary AAC-LC.
-            compatible_audio = audio.get('codec_name') == 'aac' and audio.get('profile') == 'LC'
+            # AAC-LC and HE-AAC profiles are already supported; copy them unchanged.
+            compatible_audio = audio.get('codec_name') == 'aac' and audio.get('profile') in ('LC','HE-AAC','HE-AACv2')
             command += ['-c:a', 'copy' if compatible_audio else 'aac']
             if not compatible_audio:
                 command += ['-b:a', '160k', '-ar', '48000', '-ac', '2']

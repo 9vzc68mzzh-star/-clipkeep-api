@@ -9,7 +9,8 @@
   let shareAbort = null, shareVersion = 0, sharePending = false, savingSelection = false;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const lines = () => input.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const canSave = job => job.status === 'ready' || job.file_ready;
+  const canSave = job => !!job.file_ready || job.status === 'ready' && !job.stream_ready;
+  const canDispatch = job => job.stream_ready ? job.can_download : job.status === 'ready';
   const isDone = job => job.status === 'ready' && (!job.delivery_status || job.delivery_status === 'sent');
   const receipt = job => `${job.id}:${job.attempt || 1}`;
   const selected = () => run ? run.items.filter(j => canSave(j) && !run.unselected.has(j.id)) : [];
@@ -49,7 +50,7 @@
       : 'ไฟล์จะส่งไปยัง Files > Downloads ตามการตั้งค่าเบราว์เซอร์ อาจมีหน้าต่างขออนุญาตดาวน์โหลด';
   }
   async function downloadFile(job, automatic = false) {
-    if (!run || !canSave(job)) return;
+    if (!run || !(canSave(job) || canDispatch(job))) return;
     const current=run,token=generation,key=receipt(job);
     if (!automatic || !run.dispatched.has(key) && !(isDone(job) && run.sent.has(job.id))) {
       saveAnchor(fileURL(job.download_url), job.filename);
@@ -59,7 +60,7 @@
     if (label) label.textContent = 'ส่งดาวน์โหลดแล้ว · ตรวจสอบใน Files / Downloads';
     saveNotice();
     if (!automatic) toast('ส่งคำขอดาวน์โหลดแล้ว');
-    if (job.delivery_status === 'waiting') {
+    if (!job.stream_ready && job.delivery_status === 'waiting') {
       try {
         await api(`${current.path}/${current.id}/sent`,{method:'POST',body:JSON.stringify({id:job.id,attempt:job.attempt})},current.base,current.key);
       } catch {
@@ -76,7 +77,7 @@
         const entry = sendQueue.shift();
         if (run && entry.generation === generation && (!run.dispatched.has(receipt(entry.job)) || entry.job.delivery_status === 'waiting')) {
           await downloadFile(entry.job, true);
-          await pause(1100);
+          if (!entry.job.stream_ready) await pause(1100);
         }
       }
     } finally { sending = false; if (run?.finished) controls(false); }
@@ -85,7 +86,7 @@
     let el = rows.get(job.id);
     if (!el) {
       el = document.createElement('article'); el.className = 'clip-row'; el.dataset.id = job.id;
-      el.innerHTML = '<label class="clip-select"><input type="checkbox" checked aria-label="เลือกคลิป"></label><div class="clip-thumbnail"><span>▶</span></div><div class="clip-details"><h3></h3><p class="clip-status"></p><progress max="100" value="0" aria-label="ความคืบหน้าคลิป"></progress><p class="clip-save-status"></p><div class="clip-actions"><button type="button" data-action="preview">ดู / ฟัง</button><button type="button" data-action="save">บันทึกไฟล์</button></div></div>';
+      el.innerHTML = '<label class="clip-select"><input type="checkbox" checked aria-label="เลือกคลิป"></label><div class="clip-thumbnail"><span>▶</span></div><div class="clip-details"><h3></h3><p class="clip-status"></p><progress max="100" value="0" aria-label="ความคืบหน้าคลิป"></progress><p class="clip-save-status"></p><p class="clip-timing"></p><div class="clip-actions"><button type="button" data-action="preview">ดู / ฟัง</button><button type="button" data-action="save">บันทึกไฟล์</button></div></div>';
       rows.set(job.id, el); $('#batch-list').append(el);
       el.querySelector('input').addEventListener('change', e => {
         e.target.checked ? run.unselected.delete(job.id) : run.unselected.add(job.id);
@@ -94,19 +95,22 @@
       el.querySelector('[data-action="save"]').onclick = () => downloadFile(run.items.find(j => j.id === job.id));
       el.querySelector('[data-action="preview"]').onclick = () => preview(run.items.find(j => j.id === job.id));
     }
-    const signature = JSON.stringify([job.status,job.stage,job.progress,job.title,job.thumbnail,job.warning,job.error,job.attempt,job.delivery_status]);
+    const signature = JSON.stringify([job.status,job.stage,job.progress,job.title,job.thumbnail,job.warning,job.error,job.attempt,job.delivery_status,job.can_download,job.prefetched,job.timings,job.bytes_sent]);
     if (el.dataset.signature === signature) return;
     el.dataset.signature = signature;
     el.dataset.status = job.status;
-    el.dataset.active = job.status === 'processing' || job.status === 'ready' && !isDone(job) ? 'true' : 'false';
+    el.dataset.active = !job.prefetched && (job.status === 'processing' || job.stream_ready && job.delivery_status === 'streaming' || canDispatch(job) && !isDone(job)) ? 'true' : 'false';
     el.querySelector('input').checked = canSave(job) ? !run.unselected.has(job.id) : run.selectNew;
     el.querySelector('h3').textContent = `${String(job.index).padStart(2,'0')} · ${job.title || job.url || 'กำลังอ่านข้อมูลคลิป'}`;
-    const stages = {waiting:'รอคิว',resolving:'กำลังดาวน์โหลด · อ่านข้อมูล',downloading:'กำลังดาวน์โหลด',merging:'กำลังดาวน์โหลด · รวมภาพและเสียง',converting:'กำลังดาวน์โหลด · เตรียม MP4 / แปลงไฟล์',sending:'ไฟล์พร้อม · กำลังส่งคำขอดาวน์โหลด',retrying:'ลองใหม่อัตโนมัติ',done:'เสร็จแล้ว',failed:'ไม่สำเร็จ',cancelled:'ยกเลิกแล้ว'};
-    el.querySelector('.clip-status').textContent = job.error || `${stages[job.stage] || 'รอคิว'}${el.dataset.active === 'true' ? ` · ${Math.round(job.progress || 0)}%` : ''}${job.auto_retry ? ' · ลองใหม่ 1/1' : ''}${job.warning ? ' · ' + job.warning : ''}`;
+    const stages = {waiting:'รอคิว',resolving:'กำลังดาวน์โหลด · อ่านข้อมูล',downloading:'กำลังดาวน์โหลด',merging:'กำลังดาวน์โหลด · รวมภาพและเสียง',prefetching:'เตรียมข้อมูลคลิปถัดไป',next_ready:'รอส่งตามลำดับ · ข้อมูลพร้อมแล้ว',converting:'รวมสตรีม · ไม่แปลงภาพใหม่',sending:'กำลังสตรีมลงเครื่อง',retrying:'ลองใหม่อัตโนมัติ',done:'เสร็จแล้ว',failed:'ไม่สำเร็จ',cancelled:'ยกเลิกแล้ว'};
+    el.querySelector('.clip-status').textContent = job.error || `${stages[job.stage] || 'รอคิว'}${el.dataset.active === 'true' ? job.stream_ready && !job.bytes_total && job.bytes_sent ? ` · ${Math.ceil(job.bytes_sent/1024)} KB` : ` · ${Math.round(job.progress || 0)}%` : ''}${job.auto_retry ? ' · ลองใหม่ 1/1' : ''}${job.warning ? ' · ' + job.warning : ''}`;
     const progress = el.querySelector('progress'); progress.value = job.progress || 0;
     progress.hidden = el.dataset.active !== 'true' && job.status !== 'queued';
     el.querySelector('input').disabled = !canSave(job);
     el.querySelector('.clip-actions').hidden = !canSave(job);
+    el.querySelector('[data-action="save"]').disabled = job.engine==='stream' && !run.finished;
+    const labels={resolve_s:'ลิงก์',extract_s:'ข้อมูล',probe_s:'ตรวจรูปแบบ',wait_turn_s:'รอส่ง',download_s:'รับข้อมูล',merge_s:'รวม/เสียง',send_s:'ส่ง',total_s:'รวมเวลา'};
+    el.querySelector('.clip-timing').textContent=Object.entries(labels).filter(([key])=>job.timings?.[key]!=null).map(([key,label])=>`${label} ${Number(job.timings[key]).toFixed(2)}s`).join(' · ');
     if (run.sent.has(job.id)) el.querySelector('.clip-save-status').textContent='ส่งดาวน์โหลดแล้ว · ตรวจสอบใน Files / Downloads';
     if (job.thumbnail && !el.querySelector('img')) {
       try {
@@ -124,13 +128,13 @@
     const all = $('#select-all'); all.checked = ready.length > 0 && chosen.length === ready.length;
     all.indeterminate = chosen.length > 0 && chosen.length !== ready.length;
     all.disabled = !ready.length;
-    $('#zip-all').disabled = !ready.length;
+    $('#zip-all').disabled = !ready.length || run.streaming && !run.finished;
     $('#zip-all').textContent = `ดาวน์โหลดทั้งหมดเป็น ZIP (${ready.length})`;
-    $('#save-selected').disabled = !chosen.length || savingSelection;
+    $('#save-selected').disabled = !chosen.length || savingSelection || run.streaming && !run.finished;
     $('#retry-failed').hidden = run.expired || !run.finished || !run.items.some(j => j.status === 'error' && j.error_code !== 'invalid_link');
     const canShare = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
     $('#prepare-share').hidden = !canShare || !chosen.length || shareFiles.length > 0;
-    $('#prepare-share').disabled = sharePending || chosen.reduce((n,j) => n+(j.size||0),0) > SHARE_LIMIT;
+    $('#prepare-share').disabled = sharePending || run.streaming && !run.finished || chosen.reduce((n,j) => n+(j.size||0),0) > SHARE_LIMIT;
     $('#prepare-share').title = 'เมนูแชร์รองรับรวมไม่เกิน 100 MB ต่อครั้ง เลือกน้อยลงหรือใช้ ZIP สำหรับชุดใหญ่';
   }
   function rememberBatch() {
@@ -140,21 +144,21 @@
       const parsed = parseLink(job.url);
       if (!parsed) continue;
       records = records.filter(r => r.url !== parsed.url);
-      records.unshift({id:crypto.randomUUID(),date:Date.now(),title:job.title||'คลิปของคุณ',source:parsed.source,url:parsed.url,format:run.format,quality:job.height ? job.height+'p' : 'ต้นฉบับ'});
+      records.unshift({id:crypto.randomUUID(),date:Date.now(),title:job.title||'คลิปของคุณ',source:parsed.source,url:parsed.url,format:run.format,quality:(job.quality_label||job.height) ? (job.quality_label||job.height)+'p' : 'ต้นฉบับ'});
     }
     records = records.slice(0,30); persist();
     saveState();
   }
   function render(snapshot) {
     if (!run) return;
-    run.items = snapshot.items; run.finished = snapshot.finished; run.archive_url = snapshot.archive_url;
+    run.items = snapshot.items; run.finished = snapshot.finished; run.archive_url = snapshot.archive_url;run.streaming=run.items.some(job=>job.engine==='stream');
     for (const job of run.items) {
-      if (job.status === 'ready' && !run.seenReady.has(job.id)) {
+      if (canSave(job) && !run.seenReady.has(job.id)) {
         if (!run.selectNew) run.unselected.add(job.id);
         run.seenReady.add(job.id);
       }
       row(job);
-      if (job.status === 'ready' && !run.queued.has(receipt(job))) {
+      if (canDispatch(job) && !run.queued.has(receipt(job))) {
         run.queued.add(receipt(job)); sendQueue.push({generation,job});
       }
     }
@@ -166,7 +170,7 @@
     const ready = run.items.filter(isDone).length, failed = run.items.filter(j => j.status === 'error');
     $('#batch-summary').textContent = run.finished
       ? `เสร็จแล้ว · สำเร็จ ${ready} คลิป · ไม่สำเร็จ ${failed.length} คลิป${failed.length ? ` (คลิป ${failed.map(j=>String(j.index).padStart(2,'0')).join(', ')})` : ''}`
-      : 'ดาวน์โหลดทีละคลิป ตามลำดับ · ลองใหม่อัตโนมัติ 1 ครั้ง · หยุดคลิปที่ไม่คืบหน้า 75 วินาที';
+      : 'ส่งทีละคลิป ตามลำดับ · เตรียมล่วงหน้าเพียง 1 คลิป · คัดลอกภาพเดิม ไม่แปลงวิดีโอ';
     controls(!run.finished || sendQueue.length > 0); updateActions(); saveNotice(); drainDownloads();
     if (run.finished) rememberBatch();
     saveState();
@@ -258,7 +262,7 @@
       if (!backend.ordered_delivery) throw Error('เซิร์ฟเวอร์กำลังอัปเดตคิวทีละคลิป โปรดรอสักครู่แล้วลองใหม่');
       if (!backend.public_downloads && !run.key) { requestConnection('เซิร์ฟเวอร์นี้ต้องใช้ API Key'); controls(false); return; }
       run.path = backend.public_downloads ? '/api/public/batches' : '/api/batches';
-      current.selection = {urls,format:current.format,quality:$('#quality').value,request_id:crypto.randomUUID()};
+      current.selection = {streaming:!!backend.streaming,urls,format:current.format,quality:$('#quality').value,request_id:crypto.randomUUID()};
       await submitBatch(current,token);
     } catch (e) {
       if (token !== generation) return;
@@ -268,12 +272,12 @@
       $('#resume-batch').hidden=false;
     }
   }
-  function schedule() {
+  function schedule(event) {
     clearTimeout(timer);
     const count = lines().length;
     $('#detected').textContent=count ? `${count} ลิงก์` : '';
     $('#form-message').hidden=true;
-    if (count && !busy && input.value !== lastInput) timer=setTimeout(start,900);
+    if (count && !busy && input.value !== lastInput) timer=setTimeout(start,event?.inputType==='insertFromPaste'?0:600);
   }
   function preview(job) {
     const audio = job.filename.endsWith('.mp3');
@@ -369,7 +373,7 @@
   input.removeEventListener('input',updateDetected);
   updateDetected=schedule;
   download=start;form.addEventListener('submit',start);input.addEventListener('input',schedule);
-  $('#paste-btn').onclick=async()=>{try{input.value=await navigator.clipboard.readText();schedule();input.focus();}catch{toast('แตะช่องลิงก์แล้วใช้คำสั่งวาง');input.focus();}};
+  $('#paste-btn').onclick=async()=>{try{input.value=await navigator.clipboard.readText();schedule({inputType:'insertFromPaste'});input.focus();}catch{toast('แตะช่องลิงก์แล้วใช้คำสั่งวาง');input.focus();}};
   for(const device of Object.values(DEVICE_GUIDES)) {
     device.steps[0]='ไฟล์พร้อมแล้วจะเริ่มดาวน์โหลดอัตโนมัติ อนุญาตเมื่อเบราว์เซอร์ถาม หรือใช้ปุ่ม ZIP เพื่อเก็บหลายไฟล์ในครั้งเดียว';
     device.steps[2]=device.mobile?'แตะ ZIP เพื่อแตกไฟล์ หรือใช้เมนูแชร์ → “บันทึกไปยังไฟล์” เมื่อรองรับ เลือกโฟลเดอร์ได้ด้วยตัวเอง':'เปิดไฟล์ MP4 จาก Downloads เพื่อดู หรือแตกไฟล์ ZIP เพื่อดูคลิปทั้งหมด';

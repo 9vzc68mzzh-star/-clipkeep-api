@@ -1,6 +1,7 @@
 """Select compatible source streams; never encode video or buffer a full movie."""
 import json
 import os
+import re
 import select
 import signal
 import subprocess
@@ -72,14 +73,14 @@ def choose_plan(info, kind, quality, inspect=inspect_source):
                 except MediaError:continue
             if details['video_codec']!='h264' or details.get('pix_fmt') not in ('yuv420p',None):continue
             if quality_edge(details.get('width'),details.get('height'))>quality:continue
-            copy_audio=details.get('audio_codec')=='aac' and details.get('audio_profile')=='LC'
+            copy_audio=details.get('audio_codec')=='aac' and details.get('audio_profile') in ('LC','HE-AAC','HE-AACv2')
             return {'sources':[s],'mode':'direct' if copy_audio or not details.get('audio_codec') else 'audio_aac',
                     'kind':kind,'details':details,'audio_copy':copy_audio,'source_format':s['format_id']}
         videos=[f for f in formats if h264(f) and f.get('acodec')=='none' and quality_edge(f.get('width'),f.get('height'))<=quality and f.get('url')]
         audios=[f for f in formats if f.get('vcodec')=='none' and f.get('acodec')!='none' and f.get('url')]
         if not videos or not audios:raise MediaError('compatible_video_unavailable')
         v=max(videos,key=rank);a=max(audios,key=lambda f:(str(f.get('acodec','')).startswith('mp4a.40.2'),f.get('abr') or f.get('tbr') or 0))
-        return {'sources':[source(v),source(a)],'mode':'merge','kind':kind,'audio_copy':str(a.get('acodec','')).startswith('mp4a.40.2'),
+        return {'sources':[source(v),source(a)],'mode':'merge','kind':kind,'audio_copy':str(a.get('acodec','')).startswith(('mp4a.40.2','mp4a.40.5','mp4a.40.29')),
                 'details':{'video_codec':'h264','audio_codec':'aac','width':v.get('width'),'height':v.get('height'),'size':0},
                 'source_format':str(v.get('format_id'))+'+'+str(a.get('format_id'))}
     audios=[f for f in formats if f.get('acodec') not in ('none',None) and f.get('url')]
@@ -121,7 +122,7 @@ def plan_worker(job_id, selection, initial, connection):
 
 
 def command_for(plan):
-    args=['ffmpeg','-nostdin','-hide_banner','-loglevel','error']
+    args=['ffmpeg','-nostdin','-hide_banner','-nostats','-benchmark','-loglevel','info']
     for s in plan['sources']:args+=input_args(s)
     if plan['kind']=='mp3':
         return args+['-map','0:a:0','-vn','-c:a','libmp3lame','-b:a','192k','-f','mp3','pipe:1']
@@ -145,6 +146,7 @@ def stream_bytes(plan, check, stats, on_process=lambda process:None):
                 received+=len(chunk);yield chunk
             if expected and received!=expected:raise MediaError('network_error')
         stats['merge_s']=0.0
+        stats['mux_cpu_s']=0.0
         return
     started=time.monotonic()
     with tempfile.TemporaryFile() as errors:
@@ -163,8 +165,13 @@ def stream_bytes(plan, check, stats, on_process=lambda process:None):
                 if process.wait(timeout=5):raise MediaError('network_error')
             finally:
                 if process.poll() is None:
-                    os.killpg(process.pid,signal.SIGKILL);process.wait()
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    process.wait()
                 on_process(None)
+        errors.seek(0)
+        bench=re.search(rb'bench: utime=([\d.]+)s stime=([\d.]+)s',errors.read())
+        if bench:stats['mux_cpu_s']=float(bench[1])+float(bench[2])
     stats['merge_s']=time.monotonic()-started
     # Remote-input merge and download overlap; do not add them to send wall time.
     stats['download_s']=stats['merge_s']

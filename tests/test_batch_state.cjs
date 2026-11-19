@@ -7,7 +7,7 @@ function launch({session=storage(),apiHandler,fetchHandler}={}){
  class Element{
   constructor(tag='div'){this.tag=tag;this.hidden=false;this.disabled=false;this.checked=true;this.value='';this.dataset={};this.children=[];this.handlers={};this.parts=new Map();}
   set id(value){this._id=value;elements.set('#'+value,this);}get id(){return this._id;}
-  set innerHTML(value){this.html=value;if(this.tag==='article')for(const selector of ['input','h3','.clip-status','progress','.clip-save-status','.clip-actions','.clip-thumbnail','[data-action="save"]','[data-action="preview"]'])this.parts.set(selector,new Element(selector==='input'?'input':'div'));}
+  set innerHTML(value){this.html=value;if(this.tag==='article')for(const selector of ['input','h3','.clip-status','progress','.clip-save-status','.clip-timing','.clip-actions','.clip-thumbnail','[data-action="save"]','[data-action="preview"]'])this.parts.set(selector,new Element(selector==='input'?'input':'div'));}
   get innerHTML(){return this.html||'';}
   querySelector(selector){return this.parts.get(selector)||this.children.find(c=>c.tag===selector)||null;}
   append(el){this.children.push(el);}replaceChildren(){this.children=[];}
@@ -124,4 +124,18 @@ test('14 links dispatch and acknowledge in order; a lost receipt does not resend
  app.$('#select-all').checked=false;await app.$('#select-all').emit('change');
  assert(app.$('#zip-all').textContent.includes('(13)'));await app.$('#zip-all').emit('click');
  assert(!app.saves.at(-1).url.includes('items='));assert(app.saves.at(-1).name.endsWith('.zip'));
+});
+test('streaming dispatches only the active clip, sends no receipt POST, and skips the old delay',async()=>{
+ let phase=0;
+ const one={...job(1),engine:'stream',stream_ready:true,file_ready:false,can_download:true,delivery_status:'waiting',stage:'sending',timings:{extract_s:.2}};
+ const two={...job(2),engine:'stream',stream_ready:true,file_ready:false,can_download:false,prefetched:true,delivery_status:'waiting',stage:'next_ready'};
+ const app=launch({apiHandler:()=>phase===0?snapshot([one,two],false):snapshot([{...one,file_ready:true,can_download:false,delivery_status:'sent',stage:'done'}, {...two,file_ready:true,prefetched:false,can_download:true,delivery_status:'waiting',stage:'sending'}],true)});
+ app.context.checkBackend=async()=>({batch_limit:200,public_downloads:true,ordered_delivery:true,streaming:true});
+ await app.start([one.url,two.url]);await app.settle();
+ assert.equal(app.saves.length,1);assert.equal(app.rows()[1].dataset.active,'false');
+ assert.equal(JSON.parse(app.requests[0].options.body).streaming,true);
+ assert.equal(app.requests.filter(r=>r.path.endsWith('/sent')).length,0);
+ assert.equal(app.timers.filter(t=>t.ms===1100).length,0);
+ assert(app.rows()[0].querySelector('.clip-timing').textContent.includes('0.20s'));
+ phase=1;await app.tick(1500);await app.settle();assert.equal(app.saves.length,2);
 });

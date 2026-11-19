@@ -352,7 +352,7 @@ def enqueue_batch(data, public, client):
 
 JOB_FIELDS = ('status', 'stage', 'progress', 'title', 'thumbnail', 'duration', 'height',
               'download_url', 'preview_url', 'filename', 'size', 'error', 'error_code',
-              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type', 'auto_retry', 'delivery_status', 'file_ready', 'timings', 'mode', 'source_format', 'quality_label', 'prefetched', 'stream_ready', 'engine')
+              'warning', 'index', 'attempt', 'video_codec', 'audio_codec', 'url', 'error_type', 'auto_retry', 'delivery_status', 'file_ready', 'timings', 'mode', 'source_format', 'quality_label', 'prefetched', 'stream_ready', 'engine', 'bytes_sent', 'bytes_total')
 
 
 def batch_response(batch_id, public=False):
@@ -546,7 +546,7 @@ def prepare(job_id: str, data: Download, url: str, emit=lambda event: None):
         # Prefer H.264+AAC, fall back to other codecs, then inspect/convert them.
         opts.update(format=(
             f'best[height<=?{h}][ext=mp4][acodec!=none][vcodec^=avc1]/'
-            f'best[height<=?{h}][format_id=hd][ext=mp4]/'
+            f'best[height<=?{h}][format_id={"sd" if int(h)<=480 else "hd"}][ext=mp4]/'
             f'best[height<=?{h}][format_id=sd][ext=mp4]/'
             f'bestvideo[height<={h}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/'
             f'best[height<={h}][vcodec^=avc1][acodec!=none]/'

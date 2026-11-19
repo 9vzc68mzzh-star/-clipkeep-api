@@ -49,7 +49,7 @@ class StreamQueue:
         s=self.s;job=s.jobs[job_id];batch=s.batches[job['batch_id']]
         started=time.monotonic();job.setdefault('_started',started)
         resolved=job.get('resolved_url') or batch.setdefault('resolved_links',{}).get(job['url'])
-        initial={'url':job['url'],'resolved_url':resolved,'timings':{}}
+        initial={'url':job['url'],'resolved_url':resolved,'timings':{},'index':job['index'],'attempt':job['attempt']}
         context=multiprocessing.get_context('spawn');receive,send=context.Pipe(duplex=False)
         worker=context.Process(target=self.plan_target,args=(job_id,job['selection'],initial,send))
         last=time.monotonic()
@@ -79,6 +79,7 @@ class StreamQueue:
                            stream_ready=True,delivery_status='waiting',filename=f"{job['index']:03d}-{readable}-{job_id[:8]}.{job['selection']['format']}",
                            download_url='/api/files/'+job_id,preview_url='/api/preview/'+job_id)
             self.timing(job_id,'prepare_s',time.monotonic()-started)
+            job['_plan_done']=time.monotonic()
         finally:
             if worker.pid:s.stop_worker(worker)
             receive.close();send.close()
@@ -186,10 +187,12 @@ class StreamQueue:
 
     def stream(self,job_id):
         s=self.s;job=s.jobs[job_id];batch_id=job['batch_id'];plan=job['plan'];attempt=job['attempt']
+        started=time.monotonic();job['_send_started']=started
         job.update(delivery_status='streaming',stage='sending',progress=5)
         job['_delivery_touched']=time.monotonic();self.next_prefetch(job_id)
         path=self.archive_path(batch_id);path.parent.mkdir(exist_ok=True)
-        started=time.monotonic();stats={};size=0;first=True;success=False
+        stats={};size=0;first=True;success=False
+        self.timing(job_id,'wait_turn_s',max(0,started-job.get('_plan_done',started)))
         archive=zipfile.ZipFile(path,'a',compression=zipfile.ZIP_STORED,allowZip64=True)
         original=list(archive.filelist);names=dict(archive.NameToInfo);start_dir=archive.start_dir
         target=archive.open(job['filename'],'w',force_zip64=True);offset=archive.fp.tell()
@@ -205,6 +208,7 @@ class StreamQueue:
                 target.write(chunk)
                 if first:self.timing(job_id,'first_byte_s',time.monotonic()-started);first=False
                 known=plan['details'].get('size') or 0
+                job.update(bytes_sent=size,bytes_total=known)
                 job['progress']=min(98,5+size/known*93) if known else 10
                 yield chunk
             if not size:raise MediaError('download_failed')
@@ -213,6 +217,7 @@ class StreamQueue:
             for key,value in stats.items():self.timing(job_id,key,value)
         except BaseException as exc:
             if job['attempt']==attempt:job['_stream_error']=s.error_code(exc)
+            if isinstance(exc,GeneratorExit):raise
             raise OSError('Media transfer interrupted') from None
         finally:
             if not success:
@@ -238,7 +243,7 @@ class StreamQueue:
         value=request.headers.get('range','')
         if value:
             match=re.fullmatch(r'bytes=(\d*)-(\d*)',value)
-            if not match:raise HTTPException(416,'ช่วงไฟล์ไม่ถูกต้อง')
+            if not match or not any(match.groups()):raise HTTPException(416,'ช่วงไฟล์ไม่ถูกต้อง')
             if not match[1]:start=max(0,size-int(match[2]))
             else:start=int(match[1]);end=min(size-1,int(match[2])) if match[2] else size-1
             if start>end or start>=size:raise HTTPException(416,'ช่วงไฟล์ไม่ถูกต้อง')
@@ -296,10 +301,12 @@ class ClipResponse(StreamingResponse):
                 if process and process.poll() is None:
                     try:os.killpg(process.pid,9)
                     except ProcessLookupError:pass
-            for _ in range(220):
-                try:self.generator.close();break
-                except ValueError:await asyncio.sleep(.1)
-            self.done.set()
+            try:
+                for _ in range(220):
+                    try:self.generator.close();break
+                    except ValueError:await asyncio.sleep(.1)
+                    except BaseException:break
+            finally:self.done.set()
 
 class StoredClipResponse(ClipResponse):
     def __init__(self,queue,job_id,chunks,headers):
